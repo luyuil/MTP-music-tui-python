@@ -1,0 +1,33 @@
+[project]
+name = "music-tui"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "luyuil", email = "19057235886@163.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "mutagen>=1.48.1",
+    "pillow>=13.0.0",
+    "platformdirs>=4.13.4",
+    "python-mpd2>=3.1.1",
+    "textual>=8.2.8",
+    "tomlkit>=0.15.2",
+]
+
+[project.scripts]
+music-tui = "music_tui.__main__:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pytest>=9.1.1",
+    "pytest-textual-snapshot>=1.0.0",
+    "ruff>=0.17.1",
+    "textual-dev>=1.8.0",
+]
