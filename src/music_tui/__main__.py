@@ -1,5 +1,6 @@
 import sys
 
+
 def main() -> int:
     if "--version" in sys.argv:
         print("music-tui 0.1.0")
