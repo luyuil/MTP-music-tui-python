@@ -16,7 +16,11 @@ log = logging.getLogger(__name__)
 
 IDLE_SUBSYSTEMS = ("player", "mixer", "playlist", "options")
 
-
+'''
+@1.初始化state数据,储存MPD数据
+@2.解析MPD字符信息(获取数据信息)
+@3.计算播放进度
+'''
 @dataclass(frozen=True, slots=True)
 class Status:
     state: str = "stop"
@@ -39,6 +43,7 @@ class Status:
             except (KeyError, TypeError, ValueError):
                 return default
 
+        v = num("playlist", int, None)
         return cls(
             state=d.get("state", "stop"),
             elapsed=num("elapsed",float,0.0) or 0.0,
@@ -49,7 +54,7 @@ class Status:
             random=d.get("random") == "1",
             single=d.get("single") in ("1", "oneshot"),
             consume=d.get("consume") in ("1", "oneshot"),
-            playlist_version=num("playlist", int, -1) or -1,
+            playlist_version=-1 if v is None else v
         )
 
     def position(self) -> float:
@@ -60,19 +65,23 @@ class Status:
         end = self.duration if self.duration > 0 else float("inf")
         return min(end, self.elapsed + drift)
 
+# 更新MPD的state信息
 @dataclass(frozen=True, slots=True)
 class StatusEvent:
     status: Status
 
+# 更新MPD的播放队列
 @dataclass(frozen=True, slots=True)
 class QueueEvent:
     songs: list[Song]
 
+# 检查与MPD的连接状态
 @dataclass(frozen=True, slots=True)
 class ConnectionEvent:
     connected: bool
     detail: str = ""
 
+# 连接MPD服务端+事件更新
 class MpdService:
     def __init__(self, host: str = "127.0.0.1", port: int = 6600) -> None:
         self._host = host
@@ -120,16 +129,16 @@ class MpdService:
             self.send("setvol", max(0, min(100, volume)))
 
     def set_mode(self, mode: str, enabled: bool) -> None:
-            self.send(mode, 1 if enabled else 0)   # 播放模式: repeat/random/single/consume
+        self.send(mode, 1 if enabled else 0)   # 播放模式: repeat/random/single/consume
 
     def add(self, uri: str) -> None:
-         self.send("add", uri)
+        self.send("add", uri)
 
     def clear(self) -> None:
-         self.send("clear")
+        self.send("clear")
 
     def refresh(self) -> None:
-         self.send("__status__")    # 见_execute 里的特殊处理
+        self.send("__status__")    # 见_execute 里的特殊处理
 
     def send(self, command: str, *args: object) -> None:
         # 所有 UI 命令都走这里，由 _cmd_loop 线程统一执行
@@ -197,9 +206,9 @@ class MpdService:
               command, args = item
               try:
                    if client is None:
-                    client = self._connect(for_idle=False)
-                    self._execute(client, command, args)
-                    backoff = 0.5
+                        client = self._connect(for_idle=False)
+                   self._execute(client, command, args)
+                   backoff = 0.5
               except CommandError as exc:
                 # 「stop 状态下按 next」这类，MPD 会拒绝。吞掉，UI 不崩。
                 log.debug("命令 %s 被拒绝：%s", command, exc)
@@ -250,4 +259,3 @@ class MpdService:
             self._playlist_version = status.playlist_version
             self._push(QueueEvent([Song.from_mpd(d) for d in client.playlistinfo()]))
                     
-               
