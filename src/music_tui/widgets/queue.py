@@ -5,22 +5,17 @@ from textual.containers import VerticalScroll
 from textual.reactive import reactive
 from textual.widgets import Static
 
+from music_tui.core.models import Song
 from music_tui.widgets.pane import Pane
-
-DEMO_ROWS = [
-    ("晴天", "周杰伦", "4:29"),
-    ("以父之名", "周杰伦", "5:42"),
-    ("七里香", "周杰伦", "4:59"),
-    ("Creep", "Radiohead", "3:58"),
-    ("Karma Police", "Radiohead", "4:21"),
-    ("夜曲", "周杰伦", "3:46"),
-    ("Bohemian Rhapsody", "Queen", "5:55"),
-    ("海阔天空", "Beyond", "5:26"),
-]
+from music_tui.widgets.statusbar import fmt_time
 
 
 class QueuePane(Pane):
     selected = reactive(0)               # 假焦点行
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._songs: list[Song] = []
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
@@ -32,16 +27,25 @@ class QueuePane(Pane):
     def watch_selected(self) -> None:
         self._redraw()
 
-    def move(self, delta: int) -> None:
-        self.selected = max(0, min(len(DEMO_ROWS) - 1, self.selected + delta))
-
     def _redraw(self) -> None:
+        body = self.query_one("#queue-body", Static)
+        if not self._songs:
+            body.update("[dim]队列为空[/]")
+            return
+
         lines: list[str] = []
-        for i, (title, artist, dur) in enumerate(DEMO_ROWS):
+        for i,song in enumerate(self._songs):
+            dur = fmt_time(song.duration)
             if i == self.selected:
-                lines.append(f"[reverse] {title} — {artist} [/reverse] [dim]{dur}[/]")
-            elif i == 0:
-                lines.append(f"[b]▶ {title}[/] [dim]— {artist}[/]  [dim]{dur}[/]")
+                lines.append(f"[reverse] {song.label()} [/reverse] [dim]{dur}[/]")
             else:
-                lines.append(f"  {title} [dim]— {artist}[/]  [dim]{dur}[/]")
-        self.query_one("#queue-body", Static).update("\n".join(lines))
+                lines.append(f"  {song.label()}  [dim]{dur}[/]")
+        body.update("\n".join(lines))
+
+    def set_songs(self, songs: list[Song]) -> None:
+        self._songs = songs
+        self.selected = 0
+        self._redraw()
+
+    def move(self, delta: int) -> None:
+        self.selected = max(0, min(len(self._songs)-1, self.selected + delta))
