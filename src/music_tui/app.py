@@ -30,19 +30,26 @@ class MusicTui(App):
             #hint { width: auto; }
 
             #body { height: 1fr; }
-            #queue { width: 2fr; }
+            #queue { width: 1fr; 
+                     border: round hotpink;
+                   }
             #right { width: 1fr; }
-            #cover { height: 2fr; }
-            #metadata { height: 1fr; }
+            #cover { height: 2fr;
+                     border: round hotpink; 
+                   }
+            #musializer { height: 1fr; 
+                          border: round hotpink; 
+                   }
 
             #cover .pane-body { content-align: center middle; }
-            #metadata .pane-body { content-align: left top; }
+            #musializer .pane-body { content-align: left top; }
           """
     BINDINGS: ClassVar[list[BindingType]] = [
         ("q", "quit", "退出"),
-        ("space", "play_pause", "播放/暂停"),
-        ("j", "row_down", "下移"),
-        ("k", "row_up", "上移"),
+        ("space", "play_pause", "暂停"),
+        ("down", "row_down", "下移"),
+        ("up", "row_up", "上移"),
+        ("enter", "play_selected", "播放选中"),
     ]
 
     #-----------生命周期-----------
@@ -54,12 +61,12 @@ class MusicTui(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="tabs"):
             yield Static("[b]playlist[/]   library   playing   lyrics", id="tabbar")
-            yield Static("[dim]space 播放 · j/k 选择 · q 退出[/]", id="hint")
+            yield Static("[dim]space 暂停 · ↑/↓ 选择 · enter 播放 · q 退出[/]", id="hint")
         with Horizontal(id="body"):
             yield QueuePane("queue", id="queue")
             with Vertical(id="right"):
                 yield Pane("cover", "[dim]♪[/]\n\n[dim]no cover[/]", id="cover")
-                yield Pane("metadata", "[dim]—[/]", id="metadata")
+                yield Pane("musializer", "[dim]—[/]", id="musializer")
         yield StatusBar()
 
     def on_mount(self) -> None:
@@ -100,10 +107,24 @@ class MusicTui(App):
         self.query_one("#info", Static).update(f"vol {status.volume or 0}  [b]{icon}[/]")
 
     #-----------按键动作-----------
+    # 空格暂停
     def action_play_pause(self) -> None:
         if self.svc is not None:
             self.svc.toggle()
+
+    # 上下键选择
     def action_row_down(self) -> None:
-        self.query_one(QueuePane).move(1)
+        self.query_one(QueuePane).move(1)   
     def action_row_up(self) -> None:
         self.query_one(QueuePane).move(-1)
+
+    # Enter键播放
+    def action_play_selected(self) -> None:
+        if self.svc is None:
+            return
+
+        pane = self.query_one(QueuePane)
+        pos = pane.current_position()
+        if pos is None:
+            return 
+        self.svc.play(pos)

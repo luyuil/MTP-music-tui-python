@@ -49,3 +49,8 @@ class QueuePane(Pane):
 
     def move(self, delta: int) -> None:
         self.selected = max(0, min(len(self._songs)-1, self.selected + delta))
+
+    def current_position(self) -> int | None:
+        if not self._songs:
+            return None
+        return self.selected
