@@ -105,6 +105,7 @@ class MusicTui(App):
         self.query_one("#elapsed", Static).update(fmt_time(status.position()))
         icon = "▶" if status.state == "play" else "⏸"
         self.query_one("#info", Static).update(f"vol {status.volume or 0}  [b]{icon}[/]")
+        self.query_one(QueuePane).set_playing(status.song)
 
     #-----------按键动作-----------
     # 空格暂停
@@ -114,7 +115,8 @@ class MusicTui(App):
 
     # 上下键选择
     def action_row_down(self) -> None:
-        self.query_one(QueuePane).move(1)   
+        self.query_one(QueuePane).move(1)
+           
     def action_row_up(self) -> None:
         self.query_one(QueuePane).move(-1)
 
