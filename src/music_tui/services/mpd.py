@@ -81,6 +81,13 @@ class ConnectionEvent:
     connected: bool
     detail: str = ""
 
+# 获取歌曲封面
+@dataclass(frozen=True, slots=True)
+class CoverEvent:
+    uri: str 
+    mime: str = ""
+    data: bytes | None = None
+
 # 连接MPD服务端+事件更新
 class MpdService:
     def __init__(self, host: str = "127.0.0.1", port: int = 6600) -> None:
@@ -114,19 +121,19 @@ class MpdService:
         self.send("pause")
 
     def next(self) -> None:
-            self.send("next")
+        self.send("next")
 
     def previous(self) -> None:
-            self.send("previous")
+        self.send("previous")
 
     def stop_playback(self) -> None:
-            self.send("stop")
+        self.send("stop")
 
     def seek(self, seconds:float) -> None:
-            self.send("seekcur", max(0.0, seconds))
+        self.send("seekcur", max(0.0, seconds))
 
     def setvol(self, volume: int) -> None:
-            self.send("setvol", max(0, min(100, volume)))
+        self.send("setvol", max(0, min(100, volume)))
 
     def set_mode(self, mode: str, enabled: bool) -> None:
         self.send(mode, 1 if enabled else 0)   # 播放模式: repeat/random/single/consume
@@ -153,6 +160,9 @@ class MpdService:
             except queue.Empty:
                 return events
 
+    def load_cover(self, uri: str) -> None:
+        self.send("__cover__", uri)
+
     #----------内部------------
     def _connect(self, *, for_idle: bool) -> MPDClient:
          client = MPDClient()
@@ -178,21 +188,32 @@ class MpdService:
             log.debug("断开时关闭连接失败", exc_info=True)
 
     def _push(self, event: object) -> None:
-         try:
-              self._events.put_nowait(event)
-         except queue.Full:
-             try:
+        try:
+            self._events.put_nowait(event)
+        except queue.Full:
+            try:
                 self._events.get_nowait()
-             except queue.Empty:
-                  pass
-             self._events.put_nowait(event)
+            except queue.Empty:
+                pass
+            self._events.put_nowait(event)
 
     def _push_status(self, client:MPDClient) -> None:
          self._push(StatusEvent(Status.from_dict(client.status())))
 
     def _execute(self, client:MPDClient, command: str, args: tuple) -> None:
         if command == "__status__":
-              self._push_status(client)
+            self._push_status(client)
+        elif command == "__cover__":
+            uri = args[0]
+            mime, data = "", None
+            try:
+                art = client.readpicture(uri)
+                mime = art.get("type","")
+                data = art.get("binary")
+            except CommandError as exc:
+                log.debug("读取封面失败 %s: %s", uri, exc)
+
+            self._push(CoverEvent(uri, mime, data))
         else:
             getattr(client, command)(*args)
 
@@ -258,4 +279,4 @@ class MpdService:
         if "playlist" in changed or status.playlist_version != self._playlist_version:
             self._playlist_version = status.playlist_version
             self._push(QueueEvent([Song.from_mpd(d) for d in client.playlistinfo()]))
-                    
+                   

@@ -74,6 +74,13 @@ class QueuePane(Pane):
             return None
         return self.selected
 
+
+    def uri_at(self, pos: int | None) -> str | None:
+        if pos is None or pos < 0 or pos >= len(self._songs):
+            return None
+        else:
+            return self._songs[pos].uri
+
     # 播放歌曲高亮显示
     def set_playing(self, pos: int | None) -> None:
         if pos == self.playing:
