@@ -5,7 +5,7 @@ from typing import ClassVar
 from textual.app import App, ComposeResult
 from textual.binding import BindingType
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Static
+from textual.widgets import ContentSwitcher, Static
 
 from music_tui.services.mpd import (
     ConnectionEvent,
@@ -15,8 +15,6 @@ from music_tui.services.mpd import (
     Status,
     StatusEvent,
 )
-from music_tui.widgets.cover import CoverPane
-from music_tui.widgets.pane import Pane
 from music_tui.widgets.queue import QueuePane
 from music_tui.widgets.statusbar import ProgressBar, StatusBar, fmt_time
 
@@ -25,7 +23,7 @@ class MusicTui(App):
 
     TITLE = "music-tui"
     CSS = """
-            Screen { background: $background; }
+            Screen { background: rgb(59, 66, 82); }
 
             #tabs { height: 1; background: $panel; padding: 0 1; }
             #tabbar { width: 1fr; }
@@ -43,6 +41,8 @@ class MusicTui(App):
                           border: round hotpink; 
                    }
 
+            #pages { height: 1fr; }
+
             #cover .pane-body { content-align: center middle; }
             #musializer .pane-body { content-align: left top; }
           """
@@ -52,7 +52,10 @@ class MusicTui(App):
         ("down", "row_down", "下移"),
         ("up", "row_up", "上移"),
         ("enter", "play_selected", "播放选中"),
+        ("left", "page_prev", "上一页"),
+        ("right", "page_next", "下一页"),
     ]
+    PAGES: ClassVar[tuple[str, ...]] = ("song-page", "cover-page","visualization-page")
 
     #-----------生命周期-----------
     def __init__(self, **kwargs) -> None:
@@ -60,6 +63,8 @@ class MusicTui(App):
         self.svc: MpdService | None = None
         self._last: Status | None = None
         self._cover_uri: str | None = None
+        self._cover_data: bytes | None = None
+        self._page_index = 0
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="tabs"):
@@ -68,8 +73,13 @@ class MusicTui(App):
         with Horizontal(id="body"):
             yield QueuePane("queue", id="queue")
             with Vertical(id="right"):
-                yield CoverPane("cover", id="cover")
-                yield Pane("musializer", "[dim]—[/]", id="musializer")
+                yield ContentSwitcher(
+                    Static("[dim]song page[/]", id="song-page"),
+                    Static("[dim]cover page[/]", id="cover-page"),
+                    Static("[dim]visualization page[/]", id="visualization-page"),
+                    initial = "song-page",
+                    id = "pages",
+                )
         yield StatusBar()
 
     def on_mount(self) -> None:
@@ -99,7 +109,7 @@ class MusicTui(App):
                 pass
             elif isinstance(ev, CoverEvent):
                 if ev.uri == self._cover_uri:
-                    self.query_one(CoverPane).set_cover(ev.data)
+                    self._cover_data = ev.data
 
         if self._last is not None:
             pos = self._last.position()
@@ -124,7 +134,7 @@ class MusicTui(App):
         if uri is None:
             if self._cover_uri is not None:
                 self._cover_uri = None
-                self.query_one(CoverPane).set_cover(None)
+                self._cover_data = None
             return
 
         if uri == self._cover_uri:
@@ -156,3 +166,15 @@ class MusicTui(App):
         if pos is None:
             return 
         self.svc.play(pos)
+
+    # 左右键切换UI界面
+    def action_page_prev(self) -> None:
+        self._switch_page(-1)
+    def action_page_next(self) -> None:
+        self._switch_page(1)
+    def _switch_page(self, delta: int) -> None:
+        count = len(self.PAGES)
+        self._page_index = (self._page_index + delta) % count
+        page_id = self.PAGES[self._page_index]
+        switcher = self.query_one("#pages", ContentSwitcher)
+        switcher.current = page_id
