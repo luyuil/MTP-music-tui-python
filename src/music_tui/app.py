@@ -27,9 +27,14 @@ class MusicTui(App):
 
             #tabs { height: 1; background: $panel; padding: 0 1; }
             #tabbar { width: 1fr; }
+            .tab { width: auto; padding: 0 2; color: $text-muted; }
+            .tab.active { color: $text; text-style: bold; }
             #hint { width: auto; }
 
             #body { height: 1fr; }
+            #body.cover-mode #queue{width: 3fr;}
+            #body.cover-mode #right{width: 7fr;}
+
             #queue { width: 1fr; 
                      border: round hotpink;
                    }
@@ -68,7 +73,10 @@ class MusicTui(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="tabs"):
-            yield Static("[b]playlist[/]   library   playing   lyrics", id="tabbar")
+            with Horizontal(id="tabbar"):
+                yield Static("song", id="tab-song-page", classes="tab")
+                yield Static("cover", id="tab-cover-page", classes="tab")
+                yield Static("visualization", id="tab-visualization-page", classes="tab")
             yield Static("[dim]space 暂停 · ↑/↓ 选择 · enter 播放 · q 退出[/]", id="hint")
         with Horizontal(id="body"):
             yield QueuePane("queue", id="queue")
@@ -87,6 +95,7 @@ class MusicTui(App):
         self.svc.start()
         self.set_focus(self.query_one("#queue"))
         self.set_interval(0.1, self._pump)
+        self._update_tabs()
         
     def on_unmount(self) -> None:
         if self.svc is not None:
@@ -178,3 +187,18 @@ class MusicTui(App):
         page_id = self.PAGES[self._page_index]
         switcher = self.query_one("#pages", ContentSwitcher)
         switcher.current = page_id
+        body = self.query_one("#body")
+        queue = self.query_one("#queue")
+        right = self.query_one("#right")
+        if page_id == "cover-page":
+            body.move_child(right, before=queue)
+        else:
+            body.move_child(queue, before=right)
+        body.set_class(page_id == "cover-page", "cover-mode")
+        self._update_tabs()
+
+    def _update_tabs(self) -> None:
+        current = self.PAGES[self._page_index]
+        for page_id in self.PAGES:
+            tab = self.query_one(f"#tab-{page_id}")
+            tab.set_class(page_id == current, "active")
