@@ -15,6 +15,7 @@ from music_tui.services.mpd import (
     Status,
     StatusEvent,
 )
+from music_tui.widgets.cover import CoverPane
 from music_tui.widgets.queue import QueuePane
 from music_tui.widgets.statusbar import ProgressBar, StatusBar, fmt_time
 
@@ -39,9 +40,12 @@ class MusicTui(App):
                      border: round hotpink;
                    }
             #right { width: 1fr; }
+
             #cover { height: 2fr;
                      border: round hotpink; 
                    }
+            #cover-page .pane-body { content-align: center middle; }
+
             #musializer { height: 1fr; 
                           border: round hotpink; 
                    }
@@ -83,7 +87,7 @@ class MusicTui(App):
             with Vertical(id="right"):
                 yield ContentSwitcher(
                     Static("[dim]song page[/]", id="song-page"),
-                    Static("[dim]cover page[/]", id="cover-page"),
+                    CoverPane("cover", id="cover-page"),
                     Static("[dim]visualization page[/]", id="visualization-page"),
                     initial = "song-page",
                     id = "pages",
@@ -119,6 +123,7 @@ class MusicTui(App):
             elif isinstance(ev, CoverEvent):
                 if ev.uri == self._cover_uri:
                     self._cover_data = ev.data
+                    self.query_one(CoverPane).set_cover(ev.data)
 
         if self._last is not None:
             pos = self._last.position()
@@ -137,13 +142,14 @@ class MusicTui(App):
     def _maybe_load_cover(self) -> None:
         if self.svc is None or self._last is None:
             return
-        
+
         uri = self.query_one(QueuePane).uri_at(self._last.song)
 
         if uri is None:
             if self._cover_uri is not None:
                 self._cover_uri = None
                 self._cover_data = None
+                self.query_one(CoverPane).set_cover(None)
             return
 
         if uri == self._cover_uri:

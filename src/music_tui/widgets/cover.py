@@ -4,12 +4,16 @@ from io import BytesIO
 
 import PIL
 from PIL import Image, ImageOps
-from rich.style import Style
-from rich.text import Text
 from textual.widgets import Static
 
 from music_tui.widgets.pane import Pane
 
+BRAILLE_BITS = (
+    (0, 0, 0x01), (0, 1, 0x02), (0, 2, 0x04), (1, 0, 0x08),
+    (1, 1, 0x10), (1, 2, 0x20), (0, 3, 0x40), (1, 3, 0x80),
+)
+
+threshold = 128 
 
 class CoverPane(Pane):
     def __init__(self, *args, **kwargs) -> None:
@@ -35,30 +39,37 @@ class CoverPane(Pane):
 
         if width == 0 or height == 0:
             return
+
+        # 获取正方形尺寸
+        rows = min(height, width // 2)
+        cols = rows * 2
+        if rows == 0:
+            return
+
+        dots = rows * 4          # 点阵边长：宽高都是它
+
+        gray = self.cover.convert("L")
+        gray = ImageOps.autocontrast(gray)
         
-        # ① 保持比例，缩到能放下的最大尺寸
-        img = ImageOps.contain(self.cover, (width, height * 2), method=Image.Resampling.LANCZOS)
-
-        # ② 造一块和显示区域一样大的黑底画布
-        canvas = Image.new("RGB", (width, height * 2), (0, 0, 0))
-
-        # ③ 把图贴到正中间
-        canvas.paste(img, ((width - img.width) // 2, (height * 2 - img.height) // 2))
+        hist = gray.histogram()
+        total = gray.width * gray.height
+        mean = sum(i * n for i, n in enumerate(hist)) / total
+        if mean < 128:
+            gray = ImageOps.invert(gray)
+            
+        img = ImageOps.fit(gray, (dots, dots), method=Image.Resampling.LANCZOS)
         
-        text = Text()
-        for y in range(height):
-            for x in range(width):
-                top = canvas.getpixel((x, y * 2))
-                bottom = canvas.getpixel((x, y * 2 + 1))
-                assert isinstance(top, tuple) and isinstance(bottom, tuple)
-                text.append("▀",style=Style(
-                    color=f"rgb({top[0]},{top[1]},{top[2]})",
-                    bgcolor=f"rgb({bottom[0]},{bottom[1]},{bottom[2]})",),
-                    )
-            if y < height - 1:
-                text.append("\n")
-
-        body.update(text)
+        lines = []
+        for y in range(rows):
+            row = []
+            for x in range(cols):
+                code = 0
+                for (dx, dy, bit) in BRAILLE_BITS:
+                    if img.getpixel((x*2+dx, y*4+dy)) < threshold:
+                        code |= bit
+                row.append(chr(0x2800 + code))
+            lines.append("".join(row))
+        body.update("\n".join(lines))
 
     def on_resize(self) -> None:
         self._redraw()

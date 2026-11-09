@@ -144,6 +144,27 @@ set_cover() 和 on_resize() 保持不变。
   CSS 补充（封面页内容左上对齐）：
       #cover-page .pane-body { content-align: left top; }
 
+      1. self.cover 是 None → 显示 "♪ no cover"，return
+      2. width, height = self.size；任一为 0 → return
+      3. gray = self.cover.convert("L")        # 灰度，getpixel 返回 int
+        gray = ImageOps.autocontrast(gray)    # 拉开对比
+      4. target = (width * 2, height * 4)      # 点阵尺寸
+      5. small = ImageOps.contain(gray, target, method=LANCZOS)
+      6. canvas = Image.new("L", target, 255)  # 白底！255 = 留空
+      7. canvas.paste(small, ((target_w - small.width)//2,
+                              (target_h - small.height)//2))
+      8. lines = []
+        for y in range(height):
+            row = []
+            for x in range(width):
+                code = 0
+                for (dx, dy, bit) in BITS:
+                    if canvas.getpixel((x*2+dx, y*4+dy)) < 阈值:
+                        code |= bit
+                row.append(chr(0x2800 + code))
+            lines.append("".join(row))
+      9. body.update("\n".join(lines))
+
 
 【卡 5】渲染验收（先不接 MPD）
 
