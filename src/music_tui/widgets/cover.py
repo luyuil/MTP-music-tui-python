@@ -13,7 +13,39 @@ BRAILLE_BITS = (
     (1, 1, 0x10), (1, 2, 0x20), (0, 3, 0x40), (1, 3, 0x80),
 )
 
-threshold = 128 
+# 计算灰度封面的平均阈值
+def otsu_threshold(gray: Image.Image) -> int: 
+    hist = gray.histogram()
+    total = sum(hist)
+    w_b = 0
+    sum_b = 0
+
+    max_v = 0
+    max_t = 127
+
+    if total == 0:
+        return 128
+    
+    sum_all = sum(i*h for i, h in enumerate(hist))
+
+    for t in range(256):
+        w_b += hist[t]
+        sum_b += t * hist[t]
+
+        if w_b == 0:
+            continue
+        if w_b == total:
+            break
+
+        m_b = sum_b / w_b
+        m_f = (sum_all - sum_b) / (total - w_b)
+        v = w_b * (total - w_b) * (m_b - m_f)**2
+        
+        if v > max_v:
+            max_v = v
+            max_t = t
+
+    return max_t+1
 
 class CoverPane(Pane):
     def __init__(self, *args, **kwargs) -> None:
@@ -58,6 +90,7 @@ class CoverPane(Pane):
             gray = ImageOps.invert(gray)
             
         img = ImageOps.fit(gray, (dots, dots), method=Image.Resampling.LANCZOS)
+        threshold = otsu_threshold(img)
         
         lines = []
         for y in range(rows):
