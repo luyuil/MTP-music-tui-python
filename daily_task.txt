@@ -1,24 +1,663 @@
-签名和返回值
-项	说明
-参数	gray: Image.Image，必须是 "L" 模式的灰度图
-返回	int，0–255 之间的阈值
-不修改	不改动传入的图片
-Otsu 的步骤（照着实现）
+music-tui Song 页（歌词）开发手册 · 具体版 v2
+================================================================
+目标：左侧队列不变，右侧显示歌词，当前播放行高亮并自动滚动。
 
-    hist = gray.histogram() → 长度 256 的列表，hist[v] 是灰度 v 的像素个数；
-    total = sum(hist)；total == 0 → 直接返回 128；
-    sum_all = sum(i * h for i, h in enumerate(hist))；
-    维护两个累加量，从 t = 0 扫到 255：
-        w_b += hist[t]（背景像素数）
-        sum_b += t * hist[t]（背景灰度总和）
-    每一轮算出两类：
-        背景均值 m_b = sum_b / w_b
-        前景均值 m_f = (sum_all - sum_b) / (total - w_b)
-        类间方差 v = w_b * (total - w_b) * (m_b - m_f) ** 2
-    记录使 v 最大的那个 t，最后返回它。
+本版新增：歌词统一放在 ~/Music/lrc/ 下，按"镜像目录"查找。
+这一版仍然只做最小闭环：读本地 .lrc -> 解析 -> 显示 -> 高亮 -> 滚动。
+预计 3 次坐下完成（每次 1~2 小时）。
 
-边界：
 
-    w_b == 0 或 total - w_b == 0 时跳过（除零）；
-    整张图全黑或全白（所有像素同值）→ 所有方差都是 0 → 返回 128；
-    图很小（比如 2×4 的测试图）→ 算法照样能用，但结果参考价值不大。
+零、这一版不做什么
+----------------------------------------------------------------
+先不做：
+  - 用户手动滚动时暂停跟随；
+  - 歌词偏移快捷键；
+  - 联网搜索/下载歌词；
+  - 内嵌标签歌词（mutagen）；
+  - 逐字卡拉 OK。
+
+只做：
+  本地 .lrc -> 解析 -> LyricsPane -> 当前行高亮 + 自动居中滚动。
+
+
+一、你手上已经有的、可以直接复用的东西
+----------------------------------------------------------------
+不要重写，直接调用。
+
+1. 取当前歌曲 URI
+   QueuePane.uri_at(pos: int | None) -> str | None
+   位置：src/music_tui/widgets/queue.py
+
+2. 取当前播放秒数
+   Status.position() -> float
+   位置：src/music_tui/services/mpd.py
+
+3. 事件循环
+   app.py 的 _pump()，每 0.1 秒一次，已经处理 StatusEvent / QueueEvent。
+   歌词加载和刷新都挂在这里，不新开线程。
+
+4. "切歌才加载"的防重复模式
+   app.py 的 _maybe_load_cover()：用 self._cover_uri 记住上次加载的 URI。
+   歌词照抄这个结构，换成 self._lyrics_uri。
+
+5. 页面切换
+   已完成：ContentSwitcher#pages + _switch_page + _update_tabs。
+   只需把 song-page 的占位 Static 换成 LyricsPane。
+
+6. 给歌词行加/去高亮
+   Widget.set_class(add: bool, *class_names: str) -> Self
+   例：row.set_class(True, "current")
+
+7. 滚动到某个控件并居中
+   ScrollView.scroll_to_widget(
+       widget,
+       *,
+       animate: bool = True,
+       center: bool = False,
+       ...
+   ) -> bool
+   例：scroll.scroll_to_widget(row, animate=False, center=True)
+   center=True 会自动把目标行放在可视区中间，不用自己算偏移。
+
+8. 动态增删歌词行
+   Container.mount_all(widgets: Iterable[Widget]) -> AwaitMount
+   Container.mount(widget: Widget) -> AwaitMount
+   Widget.remove_children() -> AwaitRemove
+   这三个可以直接调用，不需要 await；下一帧生效。
+
+9. 常用导入
+   from textual.app import ComposeResult
+   from textual.containers import VerticalScroll
+   from textual.widgets import Static
+   from music_tui.widgets.pane import Pane
+
+
+二、文件划分
+----------------------------------------------------------------
+新建：
+  src/music_tui/core/lyrics.py      路径规则 + 解析 + 查找（纯逻辑）
+  src/music_tui/widgets/lyrics.py   LyricsPane（只负责显示）
+  tests/test_lyrics.py              解析器与路径规则单测
+
+修改：
+  src/music_tui/config/__init__.py  放 MUSIC_DIR / LRC_DIR
+  src/music_tui/app.py              接线
+
+
+三、歌词目录设计（先定下来）
+----------------------------------------------------------------
+【卡 0.1】目录布局（现在）
+
+  ~/Music/                                  <- MPD 的 music_directory
+  ├── 松下優也 - Mr.“Broken Heart”.mp3
+  ├── Michita - Cry For Me (feat. Ami).mp3
+  ├── 王忻辰&苏星婕-去年花开.flac
+  └── lrc/                                  <- 歌词集中放这里
+      ├── 松下優也 - Mr.“Broken Heart”.lrc
+      ├── Michita - Cry For Me (feat. Ami).lrc
+      └── 王忻辰&苏星婕-去年花开.lrc
+
+  说明：
+    - lrc/ 放在 Music 里面，路径直观，和音乐同盘同备份；
+    - .lrc 不是音频，MPD 不会把它加入播放队列；
+    - 以后如果 MPD 的库列表里真的出现了 .lrc，也不影响播放，
+      只是一个无法播放的条目，可以忽略。
+
+【卡 0.2】路径规则：镜像相对路径
+
+  规则：歌词路径 = LRC_DIR / 音频相对路径，只把后缀换成 .lrc
+
+  例：
+    uri = "Michita - Cry For Me.mp3"
+      -> ~/Music/lrc/Michita - Cry For Me.lrc
+
+    uri = "专辑A/01 - 晴天.mp3"
+      -> ~/Music/lrc/专辑A/01 - 晴天.lrc
+
+  优点：
+    - 规则简单，一眼能算出路径；
+    - 不同专辑有同名歌曲时不会冲突（子目录不同）；
+    - 以后加专辑目录，代码不用改。
+
+  实现位置：core/lyrics.py
+  函数签名：
+    def lyrics_path(uri: str) -> Path:
+  内部用：
+    LRC_DIR / Path(uri).with_suffix(".lrc")
+
+【卡 0.3】需要每次扫描 lrc 文件夹吗？不需要
+
+  查找是"算路径 + 判断是否存在"，O(1)：
+    lrc = lyrics_path(uri)
+    if not lrc.exists(): ...
+
+  不需要：
+    - 启动时扫描 lrc/ 建索引；
+    - 监听文件系统变化；
+    - 增删歌曲后同步索引。
+
+  扫描只在"维护"时需要（比如清理孤儿 lrc），
+  那是以后的一个独立小工具，不在播放路径上。
+
+【卡 0.4】增删歌曲时会发生什么
+
+  新增歌曲：
+    1. 音频放进 ~/Music（以后放进专辑目录）；
+    2. 把 .lrc 放到 lrc/ 对应的镜像路径；
+    3. 不需要改任何代码，切到那首歌时自然能读到。
+    如果暂时没有 .lrc，显示"暂无歌词"，不报错。
+
+  删除歌曲：
+    1. 删音频；
+    2. lrc/ 里对应的文件会变成"孤儿"；
+    3. 孤儿没有任何影响，可以以后写个清理工具统一删。
+
+  重命名/移动歌曲：
+    音频和 lrc 要一起改。
+    这是镜像方案唯一的额外成本。
+    （如果以后想省这一步，可以改成"按 URI 哈希命名"，
+      但文件名不可读，不推荐。）
+
+【卡 0.5】以后加专辑目录
+
+  现在：
+    ~/Music/歌.mp3
+    ~/Music/lrc/歌.lrc
+
+  以后：
+    ~/Music/专辑A/01.mp3
+    ~/Music/lrc/专辑A/01.lrc
+
+  路径规则不变，load_lyrics 不用改一行代码。
+
+【卡 0.6】建目录 + 造测试歌词
+
+  1. 建目录：
+       mkdir -p ~/Music/lrc
+
+  2. 选一首歌，建同名 .lrc：
+       音频：~/Music/Michita - Cry For Me (feat. Ami).mp3
+       歌词：~/Music/lrc/Michita - Cry For Me (feat. Ami).lrc
+
+  3. 先写 10~20 行，每 4 秒一行，方便快速看到滚动：
+       [00:00.00]第一行
+       [00:04.00]第二行
+       [00:08.00]第三行
+       ...
+
+  4. 可选自查：MPD 会不会把 .lrc 当歌曲
+       touch ~/Music/lrc/__probe.lrc
+       mpc update
+       mpc ls | grep __probe
+       rm ~/Music/lrc/__probe.lrc
+     预期没有输出；如果有，也不影响播放。
+
+
+四、卡 1：数据模型（core/lyrics.py）
+----------------------------------------------------------------
+文件顶部需要：
+  from dataclasses import dataclass
+  from bisect import bisect_right
+  from pathlib import Path
+  import re
+  from music_tui.config import LRC_DIR
+
+【1.1】LyricLine
+
+  @dataclass(frozen=True)
+  class LyricLine:
+      time_ms: int
+      text: str
+
+  说明：
+    frozen=True 让对象不可变，排序、比较都安全。
+    只放数据，不要放"是否当前行"这种 UI 状态。
+
+
+五、卡 2：解析函数 parse_lrc
+----------------------------------------------------------------
+【2.1】签名
+
+  def parse_lrc(text: str) -> list[LyricLine]:
+
+  参数：整个 .lrc 文件的文本
+  返回：按 time_ms 升序的列表；没有有效行时返回 []
+
+【2.2】要处理的格式
+
+  [00:12.34]歌词内容
+  [00:01.00][00:05.00]重复的副歌
+  [ti:歌名] [ar:歌手] [al:专辑]
+  [offset:+300]
+
+【2.3】可用的内置函数
+
+  text.splitlines()                     按行拆分
+  line.strip()                          去首尾空白
+  re.finditer(pattern, string)          找所有时间戳
+  match.group(1) / (2) / (3)            取分组
+  int("12")                             字符串转整数
+  result.append(...)                    收集结果
+  result.sort(key=lambda x: x.time_ms)  排序
+
+【2.4】时间戳正则（推荐）
+
+  r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]"
+
+  说明：
+    - 分钟最多三位；
+    - 秒和毫秒之间可能是 "." 也可能是 ":"；
+    - 毫秒 1~3 位，补齐到 3 位再转 int：
+        "5"   -> 500
+        "50"  -> 50
+        "500" -> 500
+      做法：ms_str.ljust(3, "0")，再 int()。
+
+【2.5】offset 正则（推荐）
+
+  r"\[offset:\s*([+-]?\d+)\s*\]"
+
+  单位毫秒。约定正数表示歌词提前，所以最终时间要减去 offset。
+  在解析一行之前先判断是不是 offset 行，是就记下来，continue。
+
+【2.6】实现步骤
+
+  1. offset = 0，result = []
+  2. for line in text.splitlines():
+  3. 去空白；空行 continue
+  4. 是 offset 行：解析数字存进 offset，continue
+  5. 用 finditer 找这一行所有时间戳
+  6. 一个都没有：说明是 [ti:]/[ar:] 元数据，continue
+  7. 正文 = 最后一个时间戳之后的文本，strip()
+     取法：line[最后一个 match.end():].strip()
+  8. 对每个时间戳：
+       minutes = int(...)
+       seconds = int(...)
+       ms = 补齐后的 int(...)
+       time_ms = minutes*60000 + seconds*1000 + ms - offset
+       result.append(LyricLine(time_ms, 正文))
+  9. result.sort(key=lambda x: x.time_ms)
+  10. return result
+
+【2.7】边界
+
+  - 一行多个时间戳：每个生成一条；
+  - 格式不完整的行：finditer 找不到，按元数据跳过；
+  - 负 time_ms：保留，index_at 会处理；
+  - 空文本：返回 []。
+
+
+六、卡 3：按时间找当前行 index_at
+----------------------------------------------------------------
+【3.1】签名
+
+  def index_at(lines: list[LyricLine], position_ms: int) -> int:
+
+  返回：
+    -1        还没到第一句
+    0..n-1    当前行
+    n-1       超过最后一句时停在最后
+
+【3.2】用二分
+
+  from bisect import bisect_right
+
+  思路：
+    i = bisect_right(lines, position_ms, key=lambda l: l.time_ms) - 1
+    if i < 0: return -1
+    return i
+
+  说明：
+    bisect_right 返回"第一个大于 position_ms 的位置"；
+    减 1 就是"最后一句小于等于当前位置"的行号。
+
+【3.3】边界
+
+  - lines 为空：先 return -1（否则 bisect 也能跑，但语义要明确）；
+  - position_ms 为负：返回 -1；
+  - lines 必须已排序。
+
+
+七、卡 4：歌词路径 + 加载
+----------------------------------------------------------------
+【4.1】配置常量
+
+  在 src/music_tui/config/__init__.py 写：
+
+  from pathlib import Path
+
+  MUSIC_DIR = Path.home() / "Music"
+  LRC_DIR = MUSIC_DIR / "lrc"
+
+  以后做配置文件时，再换成读取 TOML。
+
+【4.2】lyrics_path
+
+  签名：def lyrics_path(uri: str) -> Path:
+
+  实现：return LRC_DIR / Path(uri).with_suffix(".lrc")
+
+  说明：
+    - uri 是 MPD 给的相对路径；
+    - with_suffix 只替换最后一段后缀，.flac / .m4a 同样适用；
+    - uri 里如果有子目录，会自动带入（镜像结构）。
+
+【4.3】load_lyrics
+
+  签名：def load_lyrics(uri: str) -> list[LyricLine] | None:
+
+  参数：uri，MPD 的相对路径
+  返回：
+    解析成功 -> list[LyricLine]
+    文件不存在 -> None
+
+  注意：不再需要 music_dir 参数，LRC_DIR 从 config 读。
+
+  步骤：
+    1. lrc = lyrics_path(uri)
+    2. if not lrc.exists(): return None
+    3. 依次尝试读取：
+         text = lrc.read_text(encoding="utf-8")
+       失败（UnicodeDecodeError）再试 gbk；
+       再失败用 encoding="utf-8", errors="replace"
+    4. return parse_lrc(text)
+
+【4.4】可用的内置函数 / 方法
+
+  Path / 运算符                    路径拼接
+  Path.with_suffix(".lrc")        换后缀
+  Path.exists()                   是否存在
+  Path.read_text(encoding=...)    一次读完
+  except UnicodeDecodeError:      换编码
+  except OSError:                 读不了时返回 None
+
+【4.5】边界
+
+  - 文件存在但为空：parse_lrc 返回 []，界面显示"暂无歌词"；
+  - uri 含中文/空格：Path 正常处理，不用手动转义；
+  - 不要把所有异常都吞成 None，编码问题和文件问题分开处理，
+    方便排查。
+
+
+八、卡 5：单测（不启动界面）
+----------------------------------------------------------------
+【5.1】新建 tests/test_lyrics.py
+
+  import：
+    from music_tui.core.lyrics import LyricLine, index_at, lyrics_path, parse_lrc
+    from music_tui.config import LRC_DIR
+
+【5.2】五个测试
+
+  1) 一行多时间戳
+     输入："[00:01.00][00:05.00]副歌"
+     断言：长度 2，时间 1000 / 5000，文本都是"副歌"
+
+  2) offset 生效
+     输入："[offset:+500]\n[00:10.00]歌词"
+     断言：时间 = 9500
+
+  3) index_at 边界
+     准备：[1000, 3000, 5000]
+     断言：
+       position 500  -> -1
+       position 1000 -> 0
+       position 3500 -> 1
+       position 9999 -> 2
+
+  4) 元数据被忽略
+     输入："[ti:歌名]\n[ar:歌手]\n[00:02.00]正文"
+     断言：长度 1
+
+  5) 路径镜像
+     断言：
+       lyrics_path("a.mp3") == LRC_DIR / "a.lrc"
+       lyrics_path("专辑A/01.flac") == LRC_DIR / "专辑A/01.lrc"
+
+【5.3】运行
+
+  .venv/bin/pytest tests/test_lyrics.py -v
+
+  全绿再往下做。
+
+
+九、卡 6：LyricsPane 控件
+----------------------------------------------------------------
+【6.1】结构
+
+  LyricsPane(Pane)
+    └── VerticalScroll#lyrics-scroll
+          ├── Static("第一行", classes="lyric")
+          ├── Static("第二行", classes="lyric")
+          └── ...
+
+  为什么每行一个 Static：
+    长句换行会让"歌词第 N 行"和"屏幕第 N 行"对不上；
+    每行一个控件，高亮和滚动都按控件来，不会错位。
+
+【6.2】__init__ 字段
+
+  self._lines: list[LyricLine] = []
+  self._rows: list[Static] = []        # 和 _lines 一一对应
+  self._current: int = -1              # 当前高亮行
+
+  set_lines 被调用时三项一起重置。
+
+【6.3】compose
+
+  def compose(self) -> ComposeResult:
+      yield VerticalScroll(id="lyrics-scroll")
+
+【6.4】set_lines
+
+  签名：def set_lines(self, lines: list[LyricLine]) -> None:
+
+  步骤：
+    1. scroll = self.query_one("#lyrics-scroll", VerticalScroll)
+    2. scroll.remove_children()
+    3. self._lines = lines
+    4. self._current = -1
+    5. if not lines:
+           scroll.mount(Static("[dim]暂无歌词[/]"))
+           self._rows = []
+           return
+    6. rows = [Static(l.text or "♪", classes="lyric") for l in lines]
+    7. scroll.mount_all(rows)
+    8. self._rows = rows
+
+  可用 API：
+    Container.mount(widget)
+    Container.mount_all(list)
+    Widget.remove_children()
+  注意：返回 awaitable，但可以直接调用，不需要 await（下一帧生效）。
+
+【6.5】set_position
+
+  签名：def set_position(self, position_ms: int) -> None:
+
+  步骤：
+    1. idx = index_at(self._lines, position_ms)
+    2. if idx == self._current: return
+    3. if 0 <= self._current < len(self._rows):
+           self._rows[self._current].set_class(False, "current")
+    4. self._current = idx
+    5. if idx < 0: return
+    6. row = self._rows[idx]
+       row.set_class(True, "current")
+    7. scroll = self.query_one("#lyrics-scroll", VerticalScroll)
+       scroll.scroll_to_widget(row, animate=False, center=True)
+
+  可用 API：
+    Widget.set_class(add: bool, *names)
+    ScrollView.scroll_to_widget(widget, animate=..., center=...)
+
+【6.6】CSS（app.py）
+
+  #lyrics-scroll { height: 1fr; }
+  .lyric { color: $text-muted; }
+  .lyric.current { color: $text; text-style: bold; }
+  #song-page { width: 1fr; height: 1fr; }
+
+  说明：
+    #song-page 是 LyricsPane 在 ContentSwitcher 里的 id，必须撑满，
+    否则切页后高度可能是 0。
+
+
+十、卡 7：接线（app.py）
+----------------------------------------------------------------
+【7.1】__init__ 加字段
+
+  self._lyrics_uri: str | None = None
+
+【7.2】新增 _maybe_load_lyrics
+
+  签名：def _maybe_load_lyrics(self) -> None:
+
+  照抄 _maybe_load_cover 的结构：
+    1. if self.svc is None or self._last is None: return
+    2. uri = self.query_one(QueuePane).uri_at(self._last.song)
+    3. if uri is None:
+           if self._lyrics_uri is not None:
+               self._lyrics_uri = None
+               self.query_one(LyricsPane).set_lines([])
+           return
+    4. if uri == self._lyrics_uri: return
+    5. self._lyrics_uri = uri
+    6. lines = load_lyrics(uri)
+       self.query_one(LyricsPane).set_lines(lines or [])
+
+  需要的 import：
+    from music_tui.core.lyrics import load_lyrics
+    from music_tui.widgets.lyrics import LyricsPane
+
+  注意：不再需要 import MUSIC_DIR，路径逻辑都在 load_lyrics 里。
+
+【7.3】在 _pump 里调用两次
+
+  StatusEvent 分支末尾：self._maybe_load_lyrics()
+  QueueEvent  分支末尾：self._maybe_load_lyrics()
+
+  原因：播放位置和队列是两个数据源，到达顺序不保证。
+
+【7.4】在 _pump 末尾刷新高亮
+
+  现有代码：
+    pos = self._last.position()
+    self.query_one(ProgressBar).progress = pos
+    self.query_one("#elapsed", Static).update(fmt_time(pos))
+
+  后面加：
+    self.query_one(LyricsPane).set_position(int(pos * 1000))
+
+  set_position 内部会判断"行没变就返回"，每 0.1 秒调用没问题。
+
+【7.5】替换占位
+
+  compose 里：
+    Static("[dim]song page[/]", id="song-page")
+  改成：
+    LyricsPane("lyrics", id="song-page")
+
+
+十一、验收（按顺序打勾）
+----------------------------------------------------------------
+  [ ] ~/Music/lrc/ 已建好
+  [ ] lrc/ 下有一份与测试歌曲同名的 .lrc
+  [ ] pytest tests/test_lyrics.py 全绿
+  [ ] song 页显示歌词，不再显示"song page"
+  [ ] 播放时当前行变亮、加粗
+  [ ] 当前行自动滚动到可视区中间
+  [ ] 切到 cover 页再切回来，歌词和高亮还在
+  [ ] 切到没有 .lrc 的歌，显示"暂无歌词"
+  [ ] 切到有 .lrc 的歌，歌词自动换
+  [ ] 队列 ↑/↓/回车/空格不受影响
+  [ ] ruff check src/ 全绿
+  [ ] mypy src/music_tui 无新增错误
+
+  验证"不需要扫描"的两条：
+  [ ] 新建一个 .lrc 后，切走再切回这首歌，能读到（不需要重启）
+  [ ] 删掉 .lrc 后，切走再切回，显示"暂无歌词"（不报错）
+      注意：同一首歌不会自动重读，靠 _lyrics_uri 变化触发；
+      切走再切回是最简单的强制重载方式。
+
+
+十二、卡住时怎么排查
+----------------------------------------------------------------
+  1. 歌词不显示：
+     a. 打印 lyrics_path(uri) 的结果，路径对不对；
+     b. 确认文件真的存在（ls 一下）；
+     c. 打印 load_lyrics 的返回值，是 None 还是 []；
+     d. 打印 _lyrics_uri，有没有被赋值。
+  2. 显示了但不高亮：
+     a. 打印 index_at 的返回值；
+     b. 检查 _rows 长度和 idx 是否越界；
+     c. 检查 CSS 类名是不是 "current"。
+  3. 高亮但没滚动：
+     a. 确认 query_one("#lyrics-scroll") 没抛异常；
+     b. 确认传进 scroll_to_widget 的 row 是 _rows 里的同一个对象。
+  4. 切页后歌词消失：
+     a. 检查 #song-page 是否有 height: 1fr；
+     b. 检查是否在切页时误调了 set_lines([])。
+  5. 路径不对：
+     a. uri 里有没有子目录；
+     b. 文件名里的空格/中文是否和音频完全一致（包括全角符号）。
+
+
+十三、以后再做：孤儿清理
+----------------------------------------------------------------
+  这是唯一需要扫描 lrc/ 的场景，和播放路径无关。
+
+  思路：
+    1. 遍历 LRC_DIR 下所有 *.lrc（Path.rglob）；
+    2. 用相对路径反推音频路径：MUSIC_DIR / relative.with_suffix(".mp3")；
+       但后缀未知，可以只比较"去掉后缀的相对路径"是否存在于音频集合中；
+    3. 用一个集合装 MUSIC_DIR 下所有音频的相对路径（去后缀）；
+    4. lrc 的相对路径（去后缀）不在集合里 -> 孤儿；
+    5. 默认只打印，不删除；加 --delete 才删。
+
+  可选的另一个方向：
+    找出"有音频但没有 lrc"的歌，作为待补歌词列表。
+
+
+十四、GitHub 搜索词
+----------------------------------------------------------------
+直接搜仓库：
+  https://github.com/search?q=textual+lyrics&type=repositories
+  https://github.com/search?q=lrc+parser+language%3APython&type=repositories
+  https://github.com/search?q=mpd+lyrics&type=repositories
+  https://github.com/search?q=terminal+synced+lyrics&type=repositories
+
+代码搜索（需要登录）：
+  "scroll_to_widget" lyrics
+  "parse_lrc" python
+  textual scroll_to_widget center
+
+可参考项目：
+  https://github.com/doakey3/pylrc                  Python LRC 解析库
+  https://github.com/moehmeni/syncedlyrics          Python 歌词获取（含 LRC）
+  https://github.com/gaher1096/sound-lyrics         终端卡拉 OK 歌词
+  https://github.com/ningmenglemon/lemony-lrc-parser  LRC 解析（中文项目）
+  https://github.com/env25/mpdlrc                  Go 的 MPD 歌词客户端
+  https://github.com/raitonoberu/sptlrx            终端同步歌词（Go）
+
+关键词：
+  LRC parser、synced lyrics、synchronized lyrics、lyrics TUI、
+  textual lyrics、mpd lyrics、scroll_to_widget、karaoke terminal
+
+
+十五、如果还是觉得大，可以再砍
+----------------------------------------------------------------
+最小中的最小（一小时出效果）：
+  - 不做 load_lyrics，直接把一段写死的歌词放进 set_lines；
+  - 用 set_interval 模拟位置，只验证"高亮 + 滚动"；
+  - 文件读取和 app 接线放到下一步。
+
+每次只解决一个问题：先界面，再数据，最后接线。
+
+
+================================================================
+节奏建议：
+  第 1 次：卡 0（建 lrc 目录 + 测试歌词）+ 卡 1~5（数据层 + 单测）。
+  第 2 次：卡 6（LyricsPane 用假数据跑通）。
+  第 3 次：卡 7（接线）+ 验收。
+================================================================

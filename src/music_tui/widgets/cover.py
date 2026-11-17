@@ -73,7 +73,7 @@ class CoverPane(Pane):
             return
 
         # 获取正方形尺寸
-        rows = min(height, width // 2)
+        rows = min(height, width//2)
         cols = rows * 2
         if rows == 0:
             return
