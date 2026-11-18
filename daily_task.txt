@@ -77,7 +77,7 @@ music-tui Song 页（歌词）开发手册 · 具体版 v2
 新建：
   src/music_tui/core/lyrics.py      路径规则 + 解析 + 查找（纯逻辑）
   src/music_tui/widgets/lyrics.py   LyricsPane（只负责显示）
-  tests/test_lyrics.py              解析器与路径规则单测
+  scripts/test_lyrics.py              解析器与路径规则单测
 
 修改：
   src/music_tui/config/__init__.py  放 MUSIC_DIR / LRC_DIR
@@ -213,6 +213,37 @@ music-tui Song 页（歌词）开发手册 · 具体版 v2
     frozen=True 让对象不可变，排序、比较都安全。
     只放数据，不要放"是否当前行"这种 UI 状态。
 
+【1.2】文件内布局：什么在类里，什么在模块级
+
+  core/lyrics.py 从上到下长这样（注意缩进）：
+
+    @dataclass(frozen=True)
+    class LyricLine:                          <- 类：只放字段
+        time_ms: int
+        text: str
+
+    def lyrics_path(uri: str) -> Path:        <- 模块级，顶格（第 1 列）
+        ...
+
+    def parse_lrc(text: str) -> list[LyricLine]:   <- 模块级，顶格
+        ...
+
+    def index_at(lines: list[LyricLine], position_ms: int) -> int:  <- 模块级
+        ...
+
+    def load_lyrics(uri: str) -> list[LyricLine] | None:  <- 模块级
+        ...
+
+  判断标准：
+
+    顶格（第 1 列）  -> 模块级函数，import 时用：
+                        from music_tui.core.lyrics import parse_lrc
+    缩进 4 空格      -> 类的方法，必须通过类或实例访问
+
+  LyricLine 里只放 time_ms / text 两个字段。
+  lyrics_path、parse_lrc、index_at、load_lyrics 全部顶格。
+  把这四个函数缩进到 class 里面是错的——那样 import 不进来。
+
 
 五、卡 2：解析函数 parse_lrc
 ----------------------------------------------------------------
@@ -230,61 +261,297 @@ music-tui Song 页（歌词）开发手册 · 具体版 v2
   [ti:歌名] [ar:歌手] [al:专辑]
   [offset:+300]
 
-【2.3】可用的内置函数
+【2.3】会用到的内置函数 / 方法
 
   text.splitlines()                     按行拆分
   line.strip()                          去首尾空白
-  re.finditer(pattern, string)          找所有时间戳
-  match.group(1) / (2) / (3)            取分组
+  re.match(pattern, line)               从行首匹配，返回 match 或 None
+  re.finditer(pattern, line)            找全部匹配，返回迭代器
+  match.group(1) / group(2) / group(3)  取分组
+  match.end()                           匹配结束位置
   int("12")                             字符串转整数
+  str.ljust(3, "0")                     右边补 0
   result.append(...)                    收集结果
   result.sort(key=lambda x: x.time_ms)  排序
 
-【2.4】时间戳正则（推荐）
+【2.4】先建立模型：逐行分类
 
-  r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]"
+  不要一上来想整个函数。把每一行想成四种之一：
 
-  说明：
-    - 分钟最多三位；
-    - 秒和毫秒之间可能是 "." 也可能是 ":"；
-    - 毫秒 1~3 位，补齐到 3 位再转 int：
-        "5"   -> 500
-        "50"  -> 50
-        "500" -> 500
-      做法：ms_str.ljust(3, "0")，再 int()。
+  类型        例子                  处理
+  空白行      ""  "   "             跳过
+  元数据行    [ti:歌名] [ar:歌手]   跳过
+  offset 行   [offset:+300]         记下数字，继续
+  歌词行      [00:12.34]歌词        提取时间 + 正文
 
-【2.5】offset 正则（推荐）
+  整个函数 = 一个 for 循环 + 四个分支。
 
-  r"\[offset:\s*([+-]?\d+)\s*\]"
+【2.5】判断顺序（不能乱）
 
-  单位毫秒。约定正数表示歌词提前，所以最终时间要减去 offset。
-  在解析一行之前先判断是不是 offset 行，是就记下来，continue。
+  每行按这个顺序检查：
 
-【2.6】实现步骤
+    1. strip() 去空白
+    2. 是空行？        -> continue
+    3. 是 offset 行？  -> 记下 offset，continue
+    4. 有时间戳吗？    -> 没有就 continue（元数据）
+    5. 有 -> 提取正文，生成记录
 
-  1. offset = 0，result = []
-  2. for line in text.splitlines():
-  3. 去空白；空行 continue
-  4. 是 offset 行：解析数字存进 offset，continue
-  5. 用 finditer 找这一行所有时间戳
-  6. 一个都没有：说明是 [ti:]/[ar:] 元数据，continue
-  7. 正文 = 最后一个时间戳之后的文本，strip()
-     取法：line[最后一个 match.end():].strip()
-  8. 对每个时间戳：
-       minutes = int(...)
-       seconds = int(...)
-       ms = 补齐后的 int(...)
-       time_ms = minutes*60000 + seconds*1000 + ms - offset
-       result.append(LyricLine(time_ms, 正文))
-  9. result.sort(key=lambda x: x.time_ms)
-  10. return result
+  为什么 offset 要排在时间戳前面：
+    [offset:+300] 里没有时间戳。如果先判断时间戳，它会被当成元数据跳过，
+    offset 永远读不到。
 
-【2.7】边界
+【2.6】空白行怎么判断
+
+  line = raw.strip()
+  if not line:
+      continue
+
+  原理：
+    "   ".strip() 得到 ""；
+    Python 里空字符串是"假值"，not "" 是 True。
+
+  等价写法：if line == "": continue。
+
+【2.7】offset 行怎么判断
+
+  m = re.match(r"\[offset:\s*([+-]?\d+)\s*\]", line)
+  if m:
+      offset = int(m.group(1))
+      continue
+
+  拆开看：
+
+    re.match        从行首匹配（开头的 [ 必须在第 0 位）
+    \[ \]           匹配字面量方括号
+    offset:         固定文字
+    \s*             允许冒号前后有空格
+    ([+-]?\d+)      捕获组：可选正负号 + 数字
+    m.group(1)      取捕获的字符串，如 "+300"
+    int("+300")     得到 300；int("-200") 得到 -200
+
+  例子：
+
+    [offset:+300]   -> 匹配，300
+    [offset: -200]  -> 匹配，-200
+    [ti:歌名]       -> None
+    歌词 [offset:1] -> None（不在行首）
+
+  注意：re.match 只看开头；找多个时间戳要用 finditer。
+
+【2.8】歌词行：找时间戳
+
+  stamps = list(re.finditer(
+      r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]",
+      line,
+  ))
+  if not stamps:
+      continue
+
+  为什么先转 list：
+    finditer 返回迭代器，只能遍历一次；后面既要数个数，又要取最后一个的
+    end()，所以先转成列表。
+
+  每个 match 的常用属性（以 [00:40.00] 为例）：
+
+    group(1)  分钟 "00"
+    group(2)  秒   "40"
+    group(3)  毫秒 "00"；没有小数部分时是 None
+    end()     这个时间戳在行里的结束位置
+
+【2.9】提取正文
+
+  text = line[stamps[-1].end():].strip()
+
+  line[10:] 就是"从第 10 个字符切到结尾"。
+
+  例子：
+
+    [00:40.00][00:44.00]副歌：Cry for me
+                     ↑
+               最后一个 match 的 end 在这里
+
+  切出来就是 "副歌：Cry for me"。
+
+【2.10】毫秒补齐
+
+  ms_str = stamp.group(3) or "0"
+  ms = int(ms_str.ljust(3, "0"))
+
+  group(3) 可能是 None（比如 [00:12] 没有小数），所以先 or "0"。
+  ljust(3, "0") = 右边补 0 到长度 3：
+
+    原始    补齐后    毫秒
+    "5"     "500"     500
+    "50"    "500"     500
+    "500"   "500"     500
+    "05"    "050"     50
+    "0"     "000"     0
+
+【2.11】算总毫秒
+
+  minutes = int(stamp.group(1))
+  seconds = int(stamp.group(2))
+  time_ms = minutes * 60000 + seconds * 1000 + ms - offset
+
+  offset 约定：[offset:+500] 表示歌词整体提前 500ms，所以减。
+
+【2.12】最后排序
+
+  result.sort(key=lambda item: item.time_ms)
+
+  两个原因：
+    1. 文件本身可能乱序；
+    2. index_at 用二分查找，前提是有序。
+
+  key 指定"按哪个字段比较"，lambda item: item.time_ms 就是取 time_ms。
+
+【2.13】拿四行真实数据走一遍
+
+  假设初始 offset = 0。
+
+  第 1 行 "   "：
+    strip() -> ""
+    not "" -> True
+    continue
+
+  第 2 行 "[ti:去年花开]"：
+    strip() -> 原样
+    不是空行
+    re.match(offset) -> None
+    finditer(时间戳) -> 空列表
+    if not stamps -> continue
+
+  第 3 行 "[offset:+500]"：
+    strip() -> 原样
+    不是空行
+    re.match -> 匹配
+    offset = int("+500") = 500
+    continue
+
+  第 4 行 "[00:40.00][00:44.00]副歌"：
+    strip() -> 原样
+    不是空行
+    offset 正则 -> None
+    finditer -> 两个 match
+    stamps[-1].end() -> 指向 "副歌" 前面
+    text = "副歌"
+    第一个 match：40*1000 - 500 = 39500
+    第二个 match：44*1000 - 500 = 43500
+    result 加两条：LyricLine(39500, "副歌")、LyricLine(43500, "副歌")
+
+  最后 sort。
+
+【2.14】常见坑
+
+  坑                              后果                            正确做法
+  用 re.findall 取时间戳          拿不到 end()，不知道正文从哪切   用 finditer
+  用 re.match 找时间戳            只匹配行首第一个，漏掉后面的      用 finditer
+  offset 判断放在时间戳后面       offset 被当元数据跳过            offset 先判断
+  int(group(3)) 直接调用          没有毫秒时 None 报错             group(3) or "0"
+  忘了排序                        二分查找结果错乱                 最后统一 sort
+
+【2.15】写代码之前先手算
+
+  拿这几行走一遍，写下中间值：
+
+    [ti:测试]
+    [offset:+500]
+
+    [00:01.00][00:05.50]副歌
+    [00:10.00]第二句
+
+  期望结果：
+
+    LyricLine(500,  "副歌")     # 1000 - 500
+    LyricLine(5000, "副歌")     # 5500 - 500
+    LyricLine(9500, "第二句")   # 10000 - 500
+
+  手算对了再写循环；写出来先跑这个例子的单测，通过后再处理真实文件。
+
+【2.16】边界
 
   - 一行多个时间戳：每个生成一条；
   - 格式不完整的行：finditer 找不到，按元数据跳过；
   - 负 time_ms：保留，index_at 会处理；
-  - 空文本：返回 []。
+  - 空文本：返回 []；
+  - 文件带 BOM：读取时用 encoding="utf-8-sig"，否则第一行时间戳可能匹配失败；
+  - CRLF 换行：splitlines() 会自动处理，不用自己删 \r。
+
+【2.17】五个最容易写错的地方（对照检查）
+
+  错误 1：把列表当 match 用
+    ms_str = stamps.group(3)          # ✗ stamps 是 list，没有 group
+    minutes = int(stamps.group(1))    # ✗ 同上
+  正确：
+    先切正文：content = line[stamps[-1].end():].strip()
+    再遍历每个时间戳：for stamp in stamps:
+        用 stamp.group(1) / group(2) / group(3)
+
+  错误 2：忘记 append
+    time_ms = ...
+    result.sort(...)                  # ✗ 算了但没放进 result
+  正确：
+    result.append(LyricLine(time_ms, content))
+
+  错误 3：sort 的 key 写错，而且放在循环里
+    result.sort(key=lambda item: time_ms)   # ✗ time_ms 是局部变量
+  正确：
+    循环结束后只排一次：
+    result.sort(key=lambda item: item.time_ms)
+
+  错误 4：index_at 里调用 lines.parse_lrc()
+    lines.parse_lrc()                 # ✗ list 没有这个方法
+  正确：
+    删掉这一行。lines 传进来时已经是 parse_lrc 的结果。
+
+  错误 5：text 被反复覆盖
+    text = line[stamps[-1].end():].strip()  # ✗ 覆盖了函数参数 text
+  正确：
+    content = line[stamps[-1].end():].strip()
+
+【2.18】循环骨架：先理清顺序再写
+
+  result = []
+  offset = 0
+
+  for raw in text.splitlines():
+      line = raw.strip()
+
+      1. 空行 -> continue
+      2. offset 行 -> 记录 offset，continue
+      3. stamps = list(finditer(时间戳, line))
+         如果为空 -> continue
+      4. content = line[stamps[-1].end():].strip()
+      5. for stamp in stamps:              <- 遍历 stamps，不是遍历 list 本身
+             minutes = int(stamp.group(1))
+             seconds = int(stamp.group(2))
+             ms = int((stamp.group(3) or "0").ljust(3, "0"))
+             time_ms = minutes*60000 + seconds*1000 + ms - offset
+             result.append(LyricLine(time_ms, content))   <- 每条都 append
+  6. result.sort(key=lambda item: item.time_ms)           <- 循环外，只排一次
+  7. return result
+
+  记忆点：
+    - "提取正文"在循环 stamps 之前做一次；
+    - "append"在循环 stamps 里面，每条时间戳一次；
+    - "sort"在两层循环都结束之后。
+
+【2.19】写完后先跑这个验证
+
+  .venv/bin/python -c "
+  from music_tui.core.lyrics import parse_lrc
+  lines = parse_lrc('[offset:+500]\n[00:01.00][00:05.50]副歌\n[00:10.00]第二句')
+  print([(l.time_ms, l.text) for l in lines])
+  "
+
+  预期：
+
+    [(500, '副歌'), (5000, '副歌'), (9500, '第二句')]
+
+  对不上时按这个顺序查：
+    - 第一条是 1000 而不是 500 -> offset 没减；
+    - 只有两条而不是三条     -> 没有遍历 stamps，只处理了最后一个；
+    - 顺序不对               -> sort 不在循环外，或 key 写成了 time_ms。
 
 
 六、卡 3：按时间找当前行 index_at
@@ -381,7 +648,12 @@ music-tui Song 页（歌词）开发手册 · 具体版 v2
 
 八、卡 5：单测（不启动界面）
 ----------------------------------------------------------------
-【5.1】新建 tests/test_lyrics.py
+【5.1】新建 scripts/test_lyrics.py
+
+  说明：
+    scripts/ 不是包，不需要 __init__.py；
+    在项目根目录执行 pytest，直接指定文件路径即可；
+    项目是 editable 安装，music_tui 能正常 import。
 
   import：
     from music_tui.core.lyrics import LyricLine, index_at, lyrics_path, parse_lrc
@@ -416,7 +688,7 @@ music-tui Song 页（歌词）开发手册 · 具体版 v2
 
 【5.3】运行
 
-  .venv/bin/pytest tests/test_lyrics.py -v
+  .venv/bin/pytest scripts/test_lyrics.py -v
 
   全绿再往下做。
 
@@ -563,7 +835,7 @@ music-tui Song 页（歌词）开发手册 · 具体版 v2
 ----------------------------------------------------------------
   [ ] ~/Music/lrc/ 已建好
   [ ] lrc/ 下有一份与测试歌曲同名的 .lrc
-  [ ] pytest tests/test_lyrics.py 全绿
+  [ ] pytest scripts/test_lyrics.py 全绿
   [ ] song 页显示歌词，不再显示"song page"
   [ ] 播放时当前行变亮、加粗
   [ ] 当前行自动滚动到可视区中间
