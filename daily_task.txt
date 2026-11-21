@@ -648,122 +648,348 @@ music-tui Song 页（歌词）开发手册 · 具体版 v2
 
 八、卡 5：单测（不启动界面）
 ----------------------------------------------------------------
-【5.1】新建 scripts/test_lyrics.py
+【5.1】为什么先写单测
+
+  解析器是纯函数：不依赖终端、MPD、Textual。
+  在这里把"时间算错、顺序错、编码错"全部消灭掉，
+  后面调界面时就不会把"解析错了"误判成"界面坏了"。
+
+  这一步不需要打开 TUI，也不需要放歌。
+
+【5.2】文件位置与运行方式
+
+  文件：scripts/test_lyrics.py
 
   说明：
     scripts/ 不是包，不需要 __init__.py；
     在项目根目录执行 pytest，直接指定文件路径即可；
     项目是 editable 安装，music_tui 能正常 import。
 
-  import：
-    from music_tui.core.lyrics import LyricLine, index_at, lyrics_path, parse_lrc
-    from music_tui.config import LRC_DIR
+  常用命令：
 
-【5.2】五个测试
+    全部跑：
+      .venv/bin/pytest scripts/test_lyrics.py -v
 
-  1) 一行多时间戳
-     输入："[00:01.00][00:05.00]副歌"
-     断言：长度 2，时间 1000 / 5000，文本都是"副歌"
+    只跑名字里带 offset 的：
+      .venv/bin/pytest scripts/test_lyrics.py -k offset -v
 
-  2) offset 生效
-     输入："[offset:+500]\n[00:10.00]歌词"
-     断言：时间 = 9500
+    只跑某一个：
+      .venv/bin/pytest scripts/test_lyrics.py::test_parse_multi_stamp -v
 
-  3) index_at 边界
-     准备：[1000, 3000, 5000]
-     断言：
-       position 500  -> -1
-       position 1000 -> 0
-       position 3500 -> 1
-       position 9999 -> 2
+    第一次失败就停：
+      .venv/bin/pytest scripts/test_lyrics.py -x -v
 
-  4) 元数据被忽略
-     输入："[ti:歌名]\n[ar:歌手]\n[00:02.00]正文"
-     断言：长度 1
+  跑之前确认环境：
+    .venv/bin/python -c "import music_tui; print('ok')"
 
-  5) 路径镜像
-     断言：
-       lyrics_path("a.mp3") == LRC_DIR / "a.lrc"
-       lyrics_path("专辑A/01.flac") == LRC_DIR / "专辑A/01.lrc"
+【5.3】文件头
 
-【5.3】运行
+  from __future__ import annotations
 
-  .venv/bin/pytest scripts/test_lyrics.py -v
+  from pathlib import Path
 
-  全绿再往下做。
+  from music_tui.config import LRC_DIR
+  from music_tui.core.lyrics import (
+      LyricLine,
+      index_at,
+      load_lyrics,
+      lyrics_path,
+      parse_lrc,
+  )
+
+  说明：
+    - 纯 assert 不需要 import pytest；
+    - 用到 pytest.raises 时再加 import pytest；
+    - monkeypatch / tmp_path 是 pytest 自动注入的参数，不用 import。
+
+【5.4】测试清单（17 个，分五组）
+
+  A. parse_lrc 基础（11 个）
+    1. 单行单时间戳
+    2. 一行多时间戳
+    3. 元数据行被忽略
+    4. 空行/空白行被忽略
+    5. 毫秒补齐：.5 / .50 / .500 / 完全没有毫秒
+    6. 跨分钟：01:05.25 -> 65250
+    7. 乱序输入 -> 输出按时间有序
+    8. 空文本 -> []
+    9. 坏行不崩（"随便一行"、"[00:xx]坏行"）
+   10. offset 正数：时间减小
+   11. offset 负数：时间增大
+
+  B. index_at 边界（1 个）
+   12. 空列表、负数、第一句之前、正好第一句、中间、正好最后、超过最后
+
+  C. lyrics_path（2 个）
+   13. 平铺：a.mp3 -> LRC_DIR/a.lrc
+   14. 子目录：专辑A/01.flac -> LRC_DIR/专辑A/01.lrc
+
+  D. load_lyrics（3 个）
+   15. 文件存在：能读出内容
+   16. 文件不存在：返回 None
+   17. GBK 编码：能自动回退
+
+【5.5】完整测试模板（可以直接抄）
+
+  注意：下面代码在文档里整体缩进 2 格用于排版。
+  复制到编辑器后，全选并按 Shift+Tab（或删掉每行开头 2 个空格），
+  让第一行 from __future__ 顶格，否则会报 IndentationError。
+
+  from __future__ import annotations
+
+  from pathlib import Path
+
+  from music_tui.config import LRC_DIR
+  from music_tui.core.lyrics import (
+      LyricLine,
+      index_at,
+      load_lyrics,
+      lyrics_path,
+      parse_lrc,
+  )
+
+
+  # ---------- parse_lrc ----------
+
+  def test_parse_single_line() -> None:
+      lines = parse_lrc("[00:01.00]hello")
+      assert len(lines) == 1
+      assert lines[0].time_ms == 1000
+      assert lines[0].text == "hello"
+
+
+  def test_parse_multi_stamp() -> None:
+      lines = parse_lrc("[00:01.00][00:05.00]副歌")
+      assert [(l.time_ms, l.text) for l in lines] == [
+          (1000, "副歌"),
+          (5000, "副歌"),
+      ]
+
+
+  def test_parse_ignores_metadata() -> None:
+      text = "[ti:歌名]\n[ar:歌手]\n[al:专辑]\n[00:02.00]正文"
+      assert len(parse_lrc(text)) == 1
+
+
+  def test_parse_ignores_blank_lines() -> None:
+      text = "\n\n[00:01.00]a\n   \n[00:02.00]b\n"
+      assert [l.text for l in parse_lrc(text)] == ["a", "b"]
+
+
+  def test_parse_ms_padding() -> None:
+      text = "[00:01.5]a\n[00:02.50]b\n[00:03.500]c\n[00:04]d"
+      assert [l.time_ms for l in parse_lrc(text)] == [1500, 2500, 3500, 4000]
+
+
+  def test_parse_cross_minute() -> None:
+      assert parse_lrc("[01:05.25]x")[0].time_ms == 65250
+
+
+  def test_parse_sorts_output() -> None:
+      text = "[00:05.00]b\n[00:01.00]a"
+      assert [l.time_ms for l in parse_lrc(text)] == [1000, 5000]
+
+
+  def test_parse_empty_text() -> None:
+      assert parse_lrc("") == []
+
+
+  def test_parse_skips_bad_lines() -> None:
+      text = "随便一行\n[00:xx]坏行\n[00:01.00]好行"
+      lines = parse_lrc(text)
+      assert len(lines) == 1
+      assert lines[0].text == "好行"
+
+
+  def test_parse_offset_positive() -> None:
+      assert parse_lrc("[offset:+500]\n[00:10.00]x")[0].time_ms == 9500
+
+
+  def test_parse_offset_negative() -> None:
+      assert parse_lrc("[offset:-500]\n[00:10.00]x")[0].time_ms == 10500
+
+
+  # ---------- index_at ----------
+
+  def test_index_at_boundaries() -> None:
+      lines = [
+          LyricLine(1000, "a"),
+          LyricLine(3000, "b"),
+          LyricLine(5000, "c"),
+      ]
+      assert index_at([], 1000) == -1
+      assert index_at(lines, -1) == -1
+      assert index_at(lines, 500) == -1
+      assert index_at(lines, 1000) == 0
+      assert index_at(lines, 2999) == 0
+      assert index_at(lines, 3000) == 1
+      assert index_at(lines, 9999) == 2
+
+
+  # ---------- lyrics_path ----------
+
+  def test_lyrics_path_flat() -> None:
+      assert lyrics_path("a.mp3") == LRC_DIR / "a.lrc"
+
+
+  def test_lyrics_path_subdir() -> None:
+      assert lyrics_path("专辑A/01.flac") == LRC_DIR / "专辑A" / "01.lrc"
+
+
+  # ---------- load_lyrics ----------
+
+  def test_load_lyrics_existing(tmp_path: Path, monkeypatch) -> None:
+      lrc = tmp_path / "a.lrc"
+      lrc.write_text("[00:01.00]你好\n", encoding="utf-8")
+      monkeypatch.setattr("music_tui.core.lyrics.LRC_DIR", tmp_path)
+
+      lines = load_lyrics("a.mp3")
+
+      assert lines is not None
+      assert lines[0].time_ms == 1000
+      assert lines[0].text == "你好"
+
+
+  def test_load_lyrics_missing(tmp_path: Path, monkeypatch) -> None:
+      monkeypatch.setattr("music_tui.core.lyrics.LRC_DIR", tmp_path)
+      assert load_lyrics("nope.mp3") is None
+
+
+  def test_load_lyrics_gbk(tmp_path: Path, monkeypatch) -> None:
+      lrc = tmp_path / "b.lrc"
+      lrc.write_bytes("[00:01.00]你好\n".encode("gbk"))
+      monkeypatch.setattr("music_tui.core.lyrics.LRC_DIR", tmp_path)
+
+      lines = load_lyrics("b.mp3")
+
+      assert lines is not None
+      assert lines[0].text == "你好"
+
+【5.6】关于 monkeypatch 的两点说明
+
+  1. 为什么用 monkeypatch，不直接改配置：
+     改全局会让后面的测试也受影响；monkeypatch 会在每个测试结束后
+     自动还原。
+
+  2. 为什么 setattr 的字符串是 "music_tui.core.lyrics.LRC_DIR"：
+     lyrics.py 里是 from music_tui.config import LRC_DIR，
+     名字被复制进了 lyrics 模块；要改的是"lyrics 模块里那个名字"，
+     不是 config 里的。如果改成 "music_tui.config.LRC_DIR"，不生效。
+
+【5.7】预期输出
+
+  scripts/test_lyrics.py::test_parse_single_line PASSED
+  scripts/test_lyrics.py::test_parse_multi_stamp PASSED
+  ...
+  scripts/test_lyrics.py::test_load_lyrics_gbk PASSED
+
+  ============================== 17 passed in 0.08s ==============================
+
+  出现 failed 时，先看断言那一行：
+    - 期望 1000 实际 1500：毫秒补齐算法错了；
+    - 期望 2 条实际 1 条：没有遍历 stamps；
+    - 期望 [1000, 5000] 实际 [5000, 1000]：没有 sort；
+    - 期望 -1 实际 0：index_at 没有处理"第一句之前"。
+
+【5.8】常见问题
+
+  现象                         原因                          处理
+  ModuleNotFoundError         在错误目录运行 / 未安装      在项目根目录跑；uv sync
+  monkeypatch 不生效          改错了模块路径                用 "music_tui.core.lyrics.LRC_DIR"
+  GBK 测试失败                读文件没有回退编码            先 utf-8，再 gbk
+  index_at 空列表报错         没有先判断空列表              if not lines: return -1
+  load_lyrics 返回 None       路径拼错 / 文件名不一致       打印 lyrics_path(uri) 对照
+
+【5.9】这一步不要做的事
+
+  - 不要在单测里读真实的 ~/Music：用 tmp_path。
+  - 不要在单测里启动 Textual App：那是卡 6 的事。
+  - 不要为了让测试通过而改断言：先判断是代码错还是期望值错。
+  - 不要一次写完 17 个再跑：写一个跑一个，失败范围最小。
 
 
 九、卡 6：LyricsPane 控件
 ----------------------------------------------------------------
-【6.1】结构
+【6.1】目标
 
-  LyricsPane(Pane)
-    └── VerticalScroll#lyrics-scroll
-          ├── Static("第一行", classes="lyric")
-          ├── Static("第二行", classes="lyric")
-          └── ...
+  做一个只负责显示的控件：给它歌词和当前时间，它负责
+  "高亮哪一行"和"滚到哪里"，不碰文件、不碰 MPD、不碰 App 状态。
+
+  结构（控件树，不是代码）：
+
+    LyricsPane(Pane)
+      └── VerticalScroll#lyrics-scroll
+            ├── 第 1 行 Static（class="lyric"）
+            ├── 第 2 行 Static
+            └── ...
 
   为什么每行一个 Static：
-    长句换行会让"歌词第 N 行"和"屏幕第 N 行"对不上；
-    每行一个控件，高亮和滚动都按控件来，不会错位。
+    长句会自动换行。用一个大 Static 装所有行时，
+    "歌词第 N 行"和"屏幕第 N 行"对不上，滚动会偏。
 
-【6.2】__init__ 字段
+【6.2】你需要自己维护的三个状态
 
-  self._lines: list[LyricLine] = []
-  self._rows: list[Static] = []        # 和 _lines 一一对应
-  self._current: int = -1              # 当前高亮行
+  字段        类型                含义
+  _lines      list[LyricLine]     当前歌词数据
+  _rows       list[Static]        和 _lines 一一对应的控件
+  _current    int                 当前高亮行，-1 表示没有
 
-  set_lines 被调用时三项一起重置。
+  规则：
+    - 三者必须同步；_rows 和 _lines 长度不一致，高亮就会指错行；
+    - 每次 set_lines 都要把 _current 重置为 -1。
 
-【6.3】compose
+【6.3】要实现的方法（只给签名和职责）
 
-  def compose(self) -> ComposeResult:
-      yield VerticalScroll(id="lyrics-scroll")
+  1) compose(self) -> ComposeResult
 
-【6.4】set_lines
+     返回一个 VerticalScroll，id 固定为 lyrics-scroll。
+     不要在这里创建歌词行。
 
-  签名：def set_lines(self, lines: list[LyricLine]) -> None:
+  2) set_lines(self, lines: list[LyricLine]) -> None
 
-  步骤：
-    1. scroll = self.query_one("#lyrics-scroll", VerticalScroll)
-    2. scroll.remove_children()
-    3. self._lines = lines
-    4. self._current = -1
-    5. if not lines:
-           scroll.mount(Static("[dim]暂无歌词[/]"))
-           self._rows = []
-           return
-    6. rows = [Static(l.text or "♪", classes="lyric") for l in lines]
-    7. scroll.mount_all(rows)
-    8. self._rows = rows
+     要做的事：
+       - 清空旧行；
+       - 按 lines 重新创建行控件；
+       - lines 为空时显示"暂无歌词"；
+       - 重置 _lines / _rows / _current。
 
-  可用 API：
-    Container.mount(widget)
-    Container.mount_all(list)
-    Widget.remove_children()
-  注意：返回 awaitable，但可以直接调用，不需要 await（下一帧生效）。
+  3) set_position(self, position_ms: int) -> None
 
-【6.5】set_position
+     要做的事：
+       - 用 index_at 算出当前行；
+       - 和 _current 相同就直接返回（避免每 100ms 重画）；
+       - 不同则：取消旧行高亮、设置新行高亮、滚动到新行；
+       - idx < 0（还没到第一句）时不点亮任何行。
 
-  签名：def set_position(self, position_ms: int) -> None:
+  4) on_resize(self) -> None（可选）
 
-  步骤：
-    1. idx = index_at(self._lines, position_ms)
-    2. if idx == self._current: return
-    3. if 0 <= self._current < len(self._rows):
-           self._rows[self._current].set_class(False, "current")
-    4. self._current = idx
-    5. if idx < 0: return
-    6. row = self._rows[idx]
-       row.set_class(True, "current")
-    7. scroll = self.query_one("#lyrics-scroll", VerticalScroll)
-       scroll.scroll_to_widget(row, animate=False, center=True)
+     第一版可以不做。如果窗口尺寸变化后滚动位置不对，
+     再在这里重新滚动到当前行。
 
-  可用 API：
-    Widget.set_class(add: bool, *names)
-    ScrollView.scroll_to_widget(widget, animate=..., center=...)
+【6.4】可用的 API
 
-【6.6】CSS（app.py）
+  self.query_one("#lyrics-scroll", VerticalScroll)
+  Container.mount(widget)
+  Container.mount_all(list_of_widgets)
+  Widget.remove_children()
+  Widget.set_class(True/False, "current")
+  ScrollView.scroll_to_widget(widget, animate=False, center=True)
+
+  说明：
+    - mount / mount_all / remove_children 返回 awaitable，
+      但可以直接调用，不需要 await；
+    - scroll_to_widget 的 center=True 会把目标行放在中间。
+
+【6.5】需要你自己想清楚的边界
+
+  - 第一次 set_position 时 _current 是 -1，没有旧行需要取消高亮；
+  - position 在第一句之前，index_at 返回 -1，不能去取 _rows[-1]；
+  - 同一行反复到达，必须直接返回，不能每次重画；
+  - 空歌词时 set_position 不能崩（_rows 为空）；
+  - 切换页面时控件可能暂时隐藏，set_lines 仍应正常工作；
+  - 长行换行后滚动定位是否还准？不准的话考虑截断或调整行高。
+
+【6.6】CSS（可以直接用）
 
   #lyrics-scroll { height: 1fr; }
   .lyric { color: $text-muted; }
@@ -771,8 +997,26 @@ music-tui Song 页（歌词）开发手册 · 具体版 v2
   #song-page { width: 1fr; height: 1fr; }
 
   说明：
-    #song-page 是 LyricsPane 在 ContentSwitcher 里的 id，必须撑满，
-    否则切页后高度可能是 0。
+    #song-page 是 LyricsPane 在 ContentSwitcher 里的 id，
+    不撑满的话切页后高度可能是 0。
+
+【6.7】验收（先不接 MPD）
+
+  在测试 App 里用写死的 20 行歌词 + 一个定时器模拟位置：
+
+  [ ] 行控件数量等于歌词行数
+  [ ] 位置推进时，只有当前行有 current 类
+  [ ] 当前行会滚到可视区中间
+  [ ] 传空列表时显示"暂无歌词"，不崩
+  [ ] 位置倒退时也能正确回退高亮
+  [ ] 同一位置连续调用 10 次，界面不闪
+
+【6.8】自查问题（答不上来就回去看 6.2 / 6.3）
+
+  1. 为什么 _rows 和 _lines 必须一一对应？
+  2. 为什么 set_position 要先比较 idx == _current？
+  3. 为什么滚动传的是控件，而不是行号？
+  4. 空歌词时 set_position 会在哪一步出错？怎么避免？
 
 
 十、卡 7：接线（app.py）

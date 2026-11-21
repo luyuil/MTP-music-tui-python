@@ -42,16 +42,18 @@ def parse_lrc(text: str) -> list[LyricLine]:
         text = line[stamps[-1].end():].strip()
 
         # 计算时间
-        ms_str = stamps.group(3) or "0"
-        ms = int(ms_str.ljust(3, "0"))
-        minutes = int(stamps.group(1))
-        seconds = int(stamps.group(2))
-        time_ms = minutes*60000 + seconds*1000 + ms - offset
+        content = line[stamps[-1].end():].strip()
+        for stamp in stamps:
+            ms_str = stamp.group(3) or "0"
+            ms = int(ms_str.ljust(3, "0"))
+            minutes = int(stamp.group(1))
+            seconds = int(stamp.group(2))           
+            time_ms = minutes*60000 + seconds*1000 + ms - offset
 
-        result.append()
+            result.append(LyricLine(time_ms, content))
 
     # 排序
-    result.sort(key=lambda item:time_ms)
+    result.sort(key=lambda item: item.time_ms)
     return result
 
 # 根据时间找到当前行
@@ -62,14 +64,19 @@ def index_at(lines: list[LyricLine], position_ms: int) -> int:
     if i < 0:return -1
     return i
 
-# 解析lrc文件路径
+# 解析lrc文件路径,判断并返回
 def load_lyrics(uri: str) -> list[LyricLine] | None:
     lrc = lyrics_path(uri)
     if not lrc.exists(): return None
 
-    text = lrc.read_text(encoding="utf-8")
-    if text == "UnicodeDecodeError":
-        text = lrc.read_text(encoding="gbk")
-
-    return parse_lrc(text)
+    try:
+        content = lrc.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        try:
+            content = lrc.read_text(encoding="gbk")
+        except UnicodeDecodeError:
+            content = lrc.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return parse_lrc(content)
 
