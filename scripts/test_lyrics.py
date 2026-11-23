@@ -5,11 +5,12 @@ from pathlib import Path
 from music_tui.config import LRC_DIR
 from music_tui.core.lyrics import (
     LyricLine,
-    index_at, 
+    index_at,
     load_lyrics,
-    lyrics_path, 
+    lyrics_path,
     parse_lrc,
 )
+
 
 def test_parse_single_line() -> None:
     lines = parse_lrc("[00:01.00]hello")

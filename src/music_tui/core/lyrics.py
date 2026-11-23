@@ -7,6 +7,7 @@ from pathlib import Path
 
 from music_tui.config import LRC_DIR
 
+
 @dataclass(frozen=True)
 class LyricLine:
     time_ms: int
@@ -37,9 +38,6 @@ def parse_lrc(text: str) -> list[LyricLine]:
         stamps = list(re.finditer(r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]",line))
         if not stamps:
             continue
-
-        # 提取歌词,去空白
-        text = line[stamps[-1].end():].strip()
 
         # 计算时间
         content = line[stamps[-1].end():].strip()

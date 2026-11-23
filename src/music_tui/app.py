@@ -7,6 +7,7 @@ from textual.binding import BindingType
 from textual.containers import Horizontal, Vertical
 from textual.widgets import ContentSwitcher, Static
 
+from music_tui.core.lyrics import load_lyrics
 from music_tui.services.mpd import (
     ConnectionEvent,
     CoverEvent,
@@ -16,6 +17,7 @@ from music_tui.services.mpd import (
     StatusEvent,
 )
 from music_tui.widgets.cover import CoverPane
+from music_tui.widgets.lyrics import LyricsPane
 from music_tui.widgets.queue import QueuePane
 from music_tui.widgets.statusbar import ProgressBar, StatusBar, fmt_time
 
@@ -49,6 +51,9 @@ class MusicTui(App):
             #musializer { height: 1fr; 
                           border: round hotpink; 
                    }
+            
+            .lyric { color: $text-muted; }
+            .lyric.current { color: $text; text-style: bold; }
 
             #pages { height: 1fr; }
 
@@ -73,6 +78,7 @@ class MusicTui(App):
         self._last: Status | None = None
         self._cover_uri: str | None = None
         self._cover_data: bytes | None = None
+        self._lyrics_uri: str | None = None
         self._page_index = 0
 
     def compose(self) -> ComposeResult:
@@ -86,7 +92,7 @@ class MusicTui(App):
             yield QueuePane("queue", id="queue")
             with Vertical(id="right"):
                 yield ContentSwitcher(
-                    Static("[dim]song page[/]", id="song-page"),
+                    LyricsPane("lyrics", id="song-page"),
                     CoverPane("cover", id="cover-page"),
                     Static("[dim]visualization page[/]", id="visualization-page"),
                     initial = "song-page",
@@ -115,9 +121,11 @@ class MusicTui(App):
                 self._last = ev.status
                 self._apply_status(ev.status)
                 self._maybe_load_cover()
+                self._maybe_load_lyrics()
             elif isinstance(ev, QueueEvent):
                 self.query_one(QueuePane).set_songs(ev.songs)
                 self._maybe_load_cover()
+                self._maybe_load_lyrics()
             elif isinstance(ev, ConnectionEvent):
                 pass
             elif isinstance(ev, CoverEvent):
@@ -129,6 +137,7 @@ class MusicTui(App):
             pos = self._last.position()
             self.query_one(ProgressBar).progress = pos
             self.query_one("#elapsed", Static).update(fmt_time(pos))
+            self.query_one(LyricsPane).set_position(int(pos * 1000))
 
     def _apply_status(self, status:Status) -> None:
         bar = self.query_one(ProgressBar)
@@ -157,6 +166,23 @@ class MusicTui(App):
 
         self._cover_uri = uri
         self.svc.load_cover(uri)
+
+    def _maybe_load_lyrics(self) -> None:
+        if self.svc is None or self._last is None:
+            return 
+
+        uri = self.query_one(QueuePane).uri_at(self._last.song)
+
+        if uri is None:
+            if self._lyrics_uri is not None:
+                self._lyrics_uri = None
+                self.query_one(LyricsPane).set_lines([])
+            return 
+
+        if uri == self._lyrics_uri: return 
+        self._lyrics_uri = uri
+        lines = load_lyrics(uri)
+        self.query_one(LyricsPane).set_lines(lines or [])
 
     #-----------按键动作-----------
     # 空格暂停
