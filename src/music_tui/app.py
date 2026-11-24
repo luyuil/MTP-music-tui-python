@@ -35,21 +35,34 @@ class MusicTui(App):
             #hint { width: auto; }
 
             #body { height: 1fr; }
-            #body.cover-mode #queue{width: 3fr;}
-            #body.cover-mode #right{width: 7fr;}
+            #body.cover-mode #queue{width: 3fr;
+                                    border: none;
+                                    border-left: solid #6c7086;
+                                    padding-right: 0;
+                                    padding-left: 2;
+                                   }
+            #body.cover-mode #right{width: 7fr;
+                                    padding-left: 0;
+                                    padding-right: 2;
+                                   }
+
+            Pane {border: none}
+            Pane:focus{border: none}
 
             #queue { width: 1fr; 
-                     border: round hotpink;
+                     border: none;
+                     border-right: solid #6c7086;
+                     padding-right: 2;
                    }
-            #right { width: 1fr; }
+            #right { width: 1fr; 
+                     padding-left: 2;
+                   }
 
             #cover { height: 2fr;
-                     border: round hotpink; 
                    }
             #cover-page .pane-body { content-align: center middle; }
 
             #musializer { height: 1fr; 
-                          border: round hotpink; 
                    }
             
             .lyric { color: $text-muted; }
@@ -59,6 +72,7 @@ class MusicTui(App):
 
             #cover .pane-body { content-align: center middle; }
             #musializer .pane-body { content-align: left top; }
+
           """
     BINDINGS: ClassVar[list[BindingType]] = [
         ("q", "quit", "退出"),
@@ -88,6 +102,8 @@ class MusicTui(App):
                 yield Static("cover", id="tab-cover-page", classes="tab")
                 yield Static("visualization", id="tab-visualization-page", classes="tab")
             yield Static("[dim]space 暂停 · ↑/↓ 选择 · enter 播放 · q 退出[/]", id="hint")
+
+
         with Horizontal(id="body"):
             yield QueuePane("queue", id="queue")
             with Vertical(id="right"):
@@ -98,6 +114,7 @@ class MusicTui(App):
                     initial = "song-page",
                     id = "pages",
                 )
+
         yield StatusBar()
 
     def on_mount(self) -> None:
