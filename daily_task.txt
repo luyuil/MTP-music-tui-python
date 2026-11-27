@@ -1,1179 +1,645 @@
-music-tui Song 页（歌词）开发手册 · 具体版 v2
+music-tui 歌单选择功能开发手册
 ================================================================
-目标：左侧队列不变，右侧显示歌词，当前播放行高亮并自动滚动。
+目标：启动后先显示"歌单列表"（~/Music 下的文件夹），
+      上下键选择，Enter 进入歌单，载入该文件夹的歌曲，
+      然后进入现有的队列 / 歌词 / 封面界面。
 
-本版新增：歌词统一放在 ~/Music/lrc/ 下，按"镜像目录"查找。
-这一版仍然只做最小闭环：读本地 .lrc -> 解析 -> 显示 -> 高亮 -> 滚动。
-预计 3 次坐下完成（每次 1~2 小时）。
+背景变化：
+  ~/Music 已经从"平铺 4 首歌"改成"按歌单分文件夹"：
+    中文   21 首
+    日语   42 首
+    纯音乐 11 首
+    其他   23 首
+    lrc/   歌词目录（不是歌单）
+  共 97 首。
+
+这一版只做"启动选歌单 + 载入文件夹"，
+不重写队列、歌词、封面、翻页。
 
 
-零、这一版不做什么
+零、这一版做什么 / 不做什么
 ----------------------------------------------------------------
-先不做：
-  - 用户手动滚动时暂停跟随；
-  - 歌词偏移快捷键；
-  - 联网搜索/下载歌词；
-  - 内嵌标签歌词（mutagen）；
-  - 逐字卡拉 OK。
+做：
+  - 扫描 ~/Music 顶层的文件夹，排除 lrc/
+  - 新做一个歌单选择界面：文件夹图标 + 名字 + 上下键 + Enter
+  - Enter 后把该文件夹的歌曲载入 MPD 队列，切到主界面
+  - 把现有歌词文件迁移到 lrc/<歌单名>/ 下
 
-只做：
-  本地 .lrc -> 解析 -> LyricsPane -> 当前行高亮 + 自动居中滚动。
+不做：
+  - 从歌单界面按 Esc 返回（可选扩展）
+  - 歌单内搜索、歌单自定义顺序、显示歌曲数量
+  - 记住上次选中的歌单
+  - 从 MPD 读目录（这一版用文件系统）
 
 
-一、你手上已经有的、可以直接复用的东西
+一、先看清现状（改之前必须知道）
 ----------------------------------------------------------------
-不要重写，直接调用。
+1. 配置
+   src/music_tui/config/__init__.py 里已有：
+     MUSIC_DIR = Path.home() / "Music"
+     LRC_DIR   = MUSIC_DIR / "lrc"
 
-1. 取当前歌曲 URI
-   QueuePane.uri_at(pos: int | None) -> str | None
-   位置：src/music_tui/widgets/queue.py
+2. 主界面
+   MusicTui.compose() 现在是：
+     #tabs（song / cover / visualization）
+     #body（QueuePane#queue + Vertical#right）
+     StatusBar
 
-2. 取当前播放秒数
-   Status.position() -> float
-   位置：src/music_tui/services/mpd.py
+3. 启动
+   on_mount() 里：
+     svc = MpdService(); svc.start()
+     set_focus(#queue)
+     set_interval(0.1, _pump)
+     _update_tabs()
 
-3. 事件循环
-   app.py 的 _pump()，每 0.1 秒一次，已经处理 StatusEvent / QueueEvent。
-   歌词加载和刷新都挂在这里，不新开线程。
+4. 队列
+   QueuePane 显示的是 MPD 的播放队列。
+   MPD 状态 / 队列变化由 _pump 消费：
+     QueueEvent -> QueuePane.set_songs(ev.songs)
+     StatusEvent -> _apply_status()
 
-4. "切歌才加载"的防重复模式
-   app.py 的 _maybe_load_cover()：用 self._cover_uri 记住上次加载的 URI。
-   歌词照抄这个结构，换成 self._lyrics_uri。
+5. MPD 服务
+   MpdService.send(command, *args) 把命令丢进命令线程。
+   _execute() 里已经有两个特殊命令：
+     __status__  -> 推 StatusEvent
+     __cover__   -> 推 CoverEvent
+   普通命令直接 getattr(client, command)(*args)。
 
-5. 页面切换
-   已完成：ContentSwitcher#pages + _switch_page + _update_tabs。
-   只需把 song-page 的占位 Static 换成 LyricsPane。
+6. 歌词
+   lyrics_path(uri) 的规则是：
+     LRC_DIR / Path(uri).with_suffix(".lrc")
+   以前 uri 是 "Michita - Cry For Me.mp3"；
+   现在 uri 会变成 "日语/Michita - Cry For Me.mp3"。
+   所以歌词必须放到：
+     ~/Music/lrc/日语/Michita - Cry For Me.lrc
+   否则进入歌单后所有歌词都会显示"暂无歌词"。
 
-6. 给歌词行加/去高亮
-   Widget.set_class(add: bool, *class_names: str) -> Self
-   例：row.set_class(True, "current")
-
-7. 滚动到某个控件并居中
-   ScrollView.scroll_to_widget(
-       widget,
-       *,
-       animate: bool = True,
-       center: bool = False,
-       ...
-   ) -> bool
-   例：scroll.scroll_to_widget(row, animate=False, center=True)
-   center=True 会自动把目标行放在可视区中间，不用自己算偏移。
-
-8. 动态增删歌词行
-   Container.mount_all(widgets: Iterable[Widget]) -> AwaitMount
-   Container.mount(widget: Widget) -> AwaitMount
-   Widget.remove_children() -> AwaitRemove
-   这三个可以直接调用，不需要 await；下一帧生效。
-
-9. 常用导入
-   from textual.app import ComposeResult
-   from textual.containers import VerticalScroll
-   from textual.widgets import Static
-   from music_tui.widgets.pane import Pane
+7. 翻页
+   PAGES / _switch_page() 操作的是 #pages 和 #body，
+   包一层主界面容器后这些 query_one 仍然有效，不用改。
 
 
-二、文件划分
+二、关键设计决定（先定下来，再写代码）
+----------------------------------------------------------------
+1. 歌单列表从文件系统读，不从 MPD 读
+   理由：
+     - 启动时 MPD 可能还没连上；
+     - 可以方便地排除 lrc/ 和隐藏目录；
+     - 排序可控。
+   MPD 只负责"把选中的文件夹加进队列"。
+
+2. 顶层用 ContentSwitcher 切"歌单页 / 主界面"
+   不 push_screen，不开第二个 Screen。
+   结构：
+     Screen
+       └── ContentSwitcher#root
+             ├── PlaylistPane#playlist-screen
+             └── Vertical#main-screen
+                   ├── #tabs
+                   ├── #body
+                   └── StatusBar
+   好处：只有一个 App，状态简单；主界面控件照常挂载。
+
+3. 载入文件夹用一条特殊命令 __folder__
+   不要在 UI 里连续 send("clear")、send("add")、send("play")。
+   一条命令在命令线程里一次做完，顺序绝对可靠，
+   也不会在三条命令之间插入别的命令。
+
+4. 用一个 _mode 标志分流按键
+   self._mode = "playlist" 或 "main"
+   上下 / Enter / 空格 / 左右都先看 _mode。
+
+5. 歌单顺序
+   用 sorted(..., key=lambda p: p.name)。
+   注意：这是 Unicode 顺序，你的四个文件夹实际会排成：
+     中文、其他、日语、纯音乐
+   如果以后想固定成"中文、日语、纯音乐、其他"，
+   在 config 里加一个 PLAYLIST_ORDER 列表，按列表下标排序。
+
+6. 文件夹图标
+   在 config 里加 PLAYLIST_ICON = "📁"。
+   如果终端里显示成方块或宽度不对，换成 "▸" 或 "🗀"。
+
+7. 空文件夹
+   允许它出现在列表里。
+   进入后 MPD 队列为空，界面显示"队列为空"，不能崩。
+
+8. 进入歌单后默认播放第一首
+   用 client.play(0)。
+   如果只想载入不播放，把这一步去掉即可。
+
+
+三、文件划分
 ----------------------------------------------------------------
 新建：
-  src/music_tui/core/lyrics.py      路径规则 + 解析 + 查找（纯逻辑）
-  src/music_tui/widgets/lyrics.py   LyricsPane（只负责显示）
-  scripts/test_lyrics.py              解析器与路径规则单测
+  src/music_tui/core/playlists.py     扫描歌单（纯逻辑，可单测）
+  src/music_tui/widgets/playlists.py  PlaylistPane（只负责显示和选择）
+  scripts/test_playlists.py           扫描逻辑单测
 
 修改：
-  src/music_tui/config/__init__.py  放 MUSIC_DIR / LRC_DIR
-  src/music_tui/app.py              接线
+  src/music_tui/config/__init__.py    加 PLAYLIST_ICON / 忽略目录
+  src/music_tui/services/mpd.py       加 load_folder + __folder__ 分支
+  src/music_tui/app.py                顶层切换、_mode、按键分流
+
+已有的文件（queue.py / lyrics.py / cover.py / statusbar.py / pane.py）
+不要动。
 
 
-三、歌词目录设计（先定下来）
+四、卡 1：扫描歌单 core/playlists.py
 ----------------------------------------------------------------
-【卡 0.1】目录布局（现在）
+【1.1】先在 config 里加两个常量
 
-  ~/Music/                                  <- MPD 的 music_directory
-  ├── 松下優也 - Mr.“Broken Heart”.mp3
-  ├── Michita - Cry For Me (feat. Ami).mp3
-  ├── 王忻辰&苏星婕-去年花开.flac
-  └── lrc/                                  <- 歌词集中放这里
-      ├── 松下優也 - Mr.“Broken Heart”.lrc
-      ├── Michita - Cry For Me (feat. Ami).lrc
-      └── 王忻辰&苏星婕-去年花开.lrc
+  PLAYLIST_ICON = "📁"
+  IGNORED_PLAYLIST_NAMES = {"lrc"}
 
   说明：
-    - lrc/ 放在 Music 里面，路径直观，和音乐同盘同备份；
-    - .lrc 不是音频，MPD 不会把它加入播放队列；
-    - 以后如果 MPD 的库列表里真的出现了 .lrc，也不影响播放，
-      只是一个无法播放的条目，可以忽略。
+    - lrc 就在 MUSIC_DIR 里，不排除的话会出现在歌单列表里；
+    - 以后如果还有 "封面" 之类的目录，也加进这个集合。
 
-【卡 0.2】路径规则：镜像相对路径
-
-  规则：歌词路径 = LRC_DIR / 音频相对路径，只把后缀换成 .lrc
-
-  例：
-    uri = "Michita - Cry For Me.mp3"
-      -> ~/Music/lrc/Michita - Cry For Me.lrc
-
-    uri = "专辑A/01 - 晴天.mp3"
-      -> ~/Music/lrc/专辑A/01 - 晴天.lrc
-
-  优点：
-    - 规则简单，一眼能算出路径；
-    - 不同专辑有同名歌曲时不会冲突（子目录不同）；
-    - 以后加专辑目录，代码不用改。
-
-  实现位置：core/lyrics.py
-  函数签名：
-    def lyrics_path(uri: str) -> Path:
-  内部用：
-    LRC_DIR / Path(uri).with_suffix(".lrc")
-
-【卡 0.3】需要每次扫描 lrc 文件夹吗？不需要
-
-  查找是"算路径 + 判断是否存在"，O(1)：
-    lrc = lyrics_path(uri)
-    if not lrc.exists(): ...
-
-  不需要：
-    - 启动时扫描 lrc/ 建索引；
-    - 监听文件系统变化；
-    - 增删歌曲后同步索引。
-
-  扫描只在"维护"时需要（比如清理孤儿 lrc），
-  那是以后的一个独立小工具，不在播放路径上。
-
-【卡 0.4】增删歌曲时会发生什么
-
-  新增歌曲：
-    1. 音频放进 ~/Music（以后放进专辑目录）；
-    2. 把 .lrc 放到 lrc/ 对应的镜像路径；
-    3. 不需要改任何代码，切到那首歌时自然能读到。
-    如果暂时没有 .lrc，显示"暂无歌词"，不报错。
-
-  删除歌曲：
-    1. 删音频；
-    2. lrc/ 里对应的文件会变成"孤儿"；
-    3. 孤儿没有任何影响，可以以后写个清理工具统一删。
-
-  重命名/移动歌曲：
-    音频和 lrc 要一起改。
-    这是镜像方案唯一的额外成本。
-    （如果以后想省这一步，可以改成"按 URI 哈希命名"，
-      但文件名不可读，不推荐。）
-
-【卡 0.5】以后加专辑目录
-
-  现在：
-    ~/Music/歌.mp3
-    ~/Music/lrc/歌.lrc
-
-  以后：
-    ~/Music/专辑A/01.mp3
-    ~/Music/lrc/专辑A/01.lrc
-
-  路径规则不变，load_lyrics 不用改一行代码。
-
-【卡 0.6】建目录 + 造测试歌词
-
-  1. 建目录：
-       mkdir -p ~/Music/lrc
-
-  2. 选一首歌，建同名 .lrc：
-       音频：~/Music/Michita - Cry For Me (feat. Ami).mp3
-       歌词：~/Music/lrc/Michita - Cry For Me (feat. Ami).lrc
-
-  3. 先写 10~20 行，每 4 秒一行，方便快速看到滚动：
-       [00:00.00]第一行
-       [00:04.00]第二行
-       [00:08.00]第三行
-       ...
-
-  4. 可选自查：MPD 会不会把 .lrc 当歌曲
-       touch ~/Music/lrc/__probe.lrc
-       mpc update
-       mpc ls | grep __probe
-       rm ~/Music/lrc/__probe.lrc
-     预期没有输出；如果有，也不影响播放。
-
-
-四、卡 1：数据模型（core/lyrics.py）
-----------------------------------------------------------------
-文件顶部需要：
-  from dataclasses import dataclass
-  from bisect import bisect_right
-  from pathlib import Path
-  import re
-  from music_tui.config import LRC_DIR
-
-【1.1】LyricLine
+【1.2】Playlist 数据类
 
   @dataclass(frozen=True)
-  class LyricLine:
-      time_ms: int
-      text: str
+  class Playlist:
+      name: str
+      path: Path
 
   说明：
-    frozen=True 让对象不可变，排序、比较都安全。
-    只放数据，不要放"是否当前行"这种 UI 状态。
+    - name 是文件夹名，也是显示名；
+    - path 是绝对路径，现在 UI 用不到，但测试和以后
+      "统计歌曲数 / 读取封面" 会用；
+    - frozen=True，和 Song / LyricLine 保持一致。
 
-【1.2】文件内布局：什么在类里，什么在模块级
+【1.3】扫描函数
 
-  core/lyrics.py 从上到下长这样（注意缩进）：
+  签名：
+    def scan_playlists(music_dir: Path) -> list[Playlist]:
 
-    @dataclass(frozen=True)
-    class LyricLine:                          <- 类：只放字段
-        time_ms: int
-        text: str
-
-    def lyrics_path(uri: str) -> Path:        <- 模块级，顶格（第 1 列）
-        ...
-
-    def parse_lrc(text: str) -> list[LyricLine]:   <- 模块级，顶格
-        ...
-
-    def index_at(lines: list[LyricLine], position_ms: int) -> int:  <- 模块级
-        ...
-
-    def load_lyrics(uri: str) -> list[LyricLine] | None:  <- 模块级
-        ...
-
-  判断标准：
-
-    顶格（第 1 列）  -> 模块级函数，import 时用：
-                        from music_tui.core.lyrics import parse_lrc
-    缩进 4 空格      -> 类的方法，必须通过类或实例访问
-
-  LyricLine 里只放 time_ms / text 两个字段。
-  lyrics_path、parse_lrc、index_at、load_lyrics 全部顶格。
-  把这四个函数缩进到 class 里面是错的——那样 import 不进来。
-
-
-五、卡 2：解析函数 parse_lrc
-----------------------------------------------------------------
-【2.1】签名
-
-  def parse_lrc(text: str) -> list[LyricLine]:
-
-  参数：整个 .lrc 文件的文本
-  返回：按 time_ms 升序的列表；没有有效行时返回 []
-
-【2.2】要处理的格式
-
-  [00:12.34]歌词内容
-  [00:01.00][00:05.00]重复的副歌
-  [ti:歌名] [ar:歌手] [al:专辑]
-  [offset:+300]
-
-【2.3】会用到的内置函数 / 方法
-
-  text.splitlines()                     按行拆分
-  line.strip()                          去首尾空白
-  re.match(pattern, line)               从行首匹配，返回 match 或 None
-  re.finditer(pattern, line)            找全部匹配，返回迭代器
-  match.group(1) / group(2) / group(3)  取分组
-  match.end()                           匹配结束位置
-  int("12")                             字符串转整数
-  str.ljust(3, "0")                     右边补 0
-  result.append(...)                    收集结果
-  result.sort(key=lambda x: x.time_ms)  排序
-
-【2.4】先建立模型：逐行分类
-
-  不要一上来想整个函数。把每一行想成四种之一：
-
-  类型        例子                  处理
-  空白行      ""  "   "             跳过
-  元数据行    [ti:歌名] [ar:歌手]   跳过
-  offset 行   [offset:+300]         记下数字，继续
-  歌词行      [00:12.34]歌词        提取时间 + 正文
-
-  整个函数 = 一个 for 循环 + 四个分支。
-
-【2.5】判断顺序（不能乱）
-
-  每行按这个顺序检查：
-
-    1. strip() 去空白
-    2. 是空行？        -> continue
-    3. 是 offset 行？  -> 记下 offset，continue
-    4. 有时间戳吗？    -> 没有就 continue（元数据）
-    5. 有 -> 提取正文，生成记录
-
-  为什么 offset 要排在时间戳前面：
-    [offset:+300] 里没有时间戳。如果先判断时间戳，它会被当成元数据跳过，
-    offset 永远读不到。
-
-【2.6】空白行怎么判断
-
-  line = raw.strip()
-  if not line:
-      continue
-
-  原理：
-    "   ".strip() 得到 ""；
-    Python 里空字符串是"假值"，not "" 是 True。
-
-  等价写法：if line == "": continue。
-
-【2.7】offset 行怎么判断
-
-  m = re.match(r"\[offset:\s*([+-]?\d+)\s*\]", line)
-  if m:
-      offset = int(m.group(1))
-      continue
-
-  拆开看：
-
-    re.match        从行首匹配（开头的 [ 必须在第 0 位）
-    \[ \]           匹配字面量方括号
-    offset:         固定文字
-    \s*             允许冒号前后有空格
-    ([+-]?\d+)      捕获组：可选正负号 + 数字
-    m.group(1)      取捕获的字符串，如 "+300"
-    int("+300")     得到 300；int("-200") 得到 -200
-
-  例子：
-
-    [offset:+300]   -> 匹配，300
-    [offset: -200]  -> 匹配，-200
-    [ti:歌名]       -> None
-    歌词 [offset:1] -> None（不在行首）
-
-  注意：re.match 只看开头；找多个时间戳要用 finditer。
-
-【2.8】歌词行：找时间戳
-
-  stamps = list(re.finditer(
-      r"\[(\d{1,3}):(\d{1,2})(?:[.:](\d{1,3}))?\]",
-      line,
-  ))
-  if not stamps:
-      continue
-
-  为什么先转 list：
-    finditer 返回迭代器，只能遍历一次；后面既要数个数，又要取最后一个的
-    end()，所以先转成列表。
-
-  每个 match 的常用属性（以 [00:40.00] 为例）：
-
-    group(1)  分钟 "00"
-    group(2)  秒   "40"
-    group(3)  毫秒 "00"；没有小数部分时是 None
-    end()     这个时间戳在行里的结束位置
-
-【2.9】提取正文
-
-  text = line[stamps[-1].end():].strip()
-
-  line[10:] 就是"从第 10 个字符切到结尾"。
-
-  例子：
-
-    [00:40.00][00:44.00]副歌：Cry for me
-                     ↑
-               最后一个 match 的 end 在这里
-
-  切出来就是 "副歌：Cry for me"。
-
-【2.10】毫秒补齐
-
-  ms_str = stamp.group(3) or "0"
-  ms = int(ms_str.ljust(3, "0"))
-
-  group(3) 可能是 None（比如 [00:12] 没有小数），所以先 or "0"。
-  ljust(3, "0") = 右边补 0 到长度 3：
-
-    原始    补齐后    毫秒
-    "5"     "500"     500
-    "50"    "500"     500
-    "500"   "500"     500
-    "05"    "050"     50
-    "0"     "000"     0
-
-【2.11】算总毫秒
-
-  minutes = int(stamp.group(1))
-  seconds = int(stamp.group(2))
-  time_ms = minutes * 60000 + seconds * 1000 + ms - offset
-
-  offset 约定：[offset:+500] 表示歌词整体提前 500ms，所以减。
-
-【2.12】最后排序
-
-  result.sort(key=lambda item: item.time_ms)
-
-  两个原因：
-    1. 文件本身可能乱序；
-    2. index_at 用二分查找，前提是有序。
-
-  key 指定"按哪个字段比较"，lambda item: item.time_ms 就是取 time_ms。
-
-【2.13】拿四行真实数据走一遍
-
-  假设初始 offset = 0。
-
-  第 1 行 "   "：
-    strip() -> ""
-    not "" -> True
-    continue
-
-  第 2 行 "[ti:去年花开]"：
-    strip() -> 原样
-    不是空行
-    re.match(offset) -> None
-    finditer(时间戳) -> 空列表
-    if not stamps -> continue
-
-  第 3 行 "[offset:+500]"：
-    strip() -> 原样
-    不是空行
-    re.match -> 匹配
-    offset = int("+500") = 500
-    continue
-
-  第 4 行 "[00:40.00][00:44.00]副歌"：
-    strip() -> 原样
-    不是空行
-    offset 正则 -> None
-    finditer -> 两个 match
-    stamps[-1].end() -> 指向 "副歌" 前面
-    text = "副歌"
-    第一个 match：40*1000 - 500 = 39500
-    第二个 match：44*1000 - 500 = 43500
-    result 加两条：LyricLine(39500, "副歌")、LyricLine(43500, "副歌")
-
-  最后 sort。
-
-【2.14】常见坑
-
-  坑                              后果                            正确做法
-  用 re.findall 取时间戳          拿不到 end()，不知道正文从哪切   用 finditer
-  用 re.match 找时间戳            只匹配行首第一个，漏掉后面的      用 finditer
-  offset 判断放在时间戳后面       offset 被当元数据跳过            offset 先判断
-  int(group(3)) 直接调用          没有毫秒时 None 报错             group(3) or "0"
-  忘了排序                        二分查找结果错乱                 最后统一 sort
-
-【2.15】写代码之前先手算
-
-  拿这几行走一遍，写下中间值：
-
-    [ti:测试]
-    [offset:+500]
-
-    [00:01.00][00:05.50]副歌
-    [00:10.00]第二句
-
-  期望结果：
-
-    LyricLine(500,  "副歌")     # 1000 - 500
-    LyricLine(5000, "副歌")     # 5500 - 500
-    LyricLine(9500, "第二句")   # 10000 - 500
-
-  手算对了再写循环；写出来先跑这个例子的单测，通过后再处理真实文件。
-
-【2.16】边界
-
-  - 一行多个时间戳：每个生成一条；
-  - 格式不完整的行：finditer 找不到，按元数据跳过；
-  - 负 time_ms：保留，index_at 会处理；
-  - 空文本：返回 []；
-  - 文件带 BOM：读取时用 encoding="utf-8-sig"，否则第一行时间戳可能匹配失败；
-  - CRLF 换行：splitlines() 会自动处理，不用自己删 \r。
-
-【2.17】五个最容易写错的地方（对照检查）
-
-  错误 1：把列表当 match 用
-    ms_str = stamps.group(3)          # ✗ stamps 是 list，没有 group
-    minutes = int(stamps.group(1))    # ✗ 同上
-  正确：
-    先切正文：content = line[stamps[-1].end():].strip()
-    再遍历每个时间戳：for stamp in stamps:
-        用 stamp.group(1) / group(2) / group(3)
-
-  错误 2：忘记 append
-    time_ms = ...
-    result.sort(...)                  # ✗ 算了但没放进 result
-  正确：
-    result.append(LyricLine(time_ms, content))
-
-  错误 3：sort 的 key 写错，而且放在循环里
-    result.sort(key=lambda item: time_ms)   # ✗ time_ms 是局部变量
-  正确：
-    循环结束后只排一次：
-    result.sort(key=lambda item: item.time_ms)
-
-  错误 4：index_at 里调用 lines.parse_lrc()
-    lines.parse_lrc()                 # ✗ list 没有这个方法
-  正确：
-    删掉这一行。lines 传进来时已经是 parse_lrc 的结果。
-
-  错误 5：text 被反复覆盖
-    text = line[stamps[-1].end():].strip()  # ✗ 覆盖了函数参数 text
-  正确：
-    content = line[stamps[-1].end():].strip()
-
-【2.18】循环骨架：先理清顺序再写
-
-  result = []
-  offset = 0
-
-  for raw in text.splitlines():
-      line = raw.strip()
-
-      1. 空行 -> continue
-      2. offset 行 -> 记录 offset，continue
-      3. stamps = list(finditer(时间戳, line))
-         如果为空 -> continue
-      4. content = line[stamps[-1].end():].strip()
-      5. for stamp in stamps:              <- 遍历 stamps，不是遍历 list 本身
-             minutes = int(stamp.group(1))
-             seconds = int(stamp.group(2))
-             ms = int((stamp.group(3) or "0").ljust(3, "0"))
-             time_ms = minutes*60000 + seconds*1000 + ms - offset
-             result.append(LyricLine(time_ms, content))   <- 每条都 append
-  6. result.sort(key=lambda item: item.time_ms)           <- 循环外，只排一次
-  7. return result
-
-  记忆点：
-    - "提取正文"在循环 stamps 之前做一次；
-    - "append"在循环 stamps 里面，每条时间戳一次；
-    - "sort"在两层循环都结束之后。
-
-【2.19】写完后先跑这个验证
-
-  .venv/bin/python -c "
-  from music_tui.core.lyrics import parse_lrc
-  lines = parse_lrc('[offset:+500]\n[00:01.00][00:05.50]副歌\n[00:10.00]第二句')
-  print([(l.time_ms, l.text) for l in lines])
-  "
-
-  预期：
-
-    [(500, '副歌'), (5000, '副歌'), (9500, '第二句')]
-
-  对不上时按这个顺序查：
-    - 第一条是 1000 而不是 500 -> offset 没减；
-    - 只有两条而不是三条     -> 没有遍历 stamps，只处理了最后一个；
-    - 顺序不对               -> sort 不在循环外，或 key 写成了 time_ms。
-
-
-六、卡 3：按时间找当前行 index_at
-----------------------------------------------------------------
-【3.1】签名
-
-  def index_at(lines: list[LyricLine], position_ms: int) -> int:
-
-  返回：
-    -1        还没到第一句
-    0..n-1    当前行
-    n-1       超过最后一句时停在最后
-
-【3.2】用二分
-
-  from bisect import bisect_right
-
-  思路：
-    i = bisect_right(lines, position_ms, key=lambda l: l.time_ms) - 1
-    if i < 0: return -1
-    return i
-
-  说明：
-    bisect_right 返回"第一个大于 position_ms 的位置"；
-    减 1 就是"最后一句小于等于当前位置"的行号。
-
-【3.3】边界
-
-  - lines 为空：先 return -1（否则 bisect 也能跑，但语义要明确）；
-  - position_ms 为负：返回 -1；
-  - lines 必须已排序。
-
-
-七、卡 4：歌词路径 + 加载
-----------------------------------------------------------------
-【4.1】配置常量
-
-  在 src/music_tui/config/__init__.py 写：
-
-  from pathlib import Path
-
-  MUSIC_DIR = Path.home() / "Music"
-  LRC_DIR = MUSIC_DIR / "lrc"
-
-  以后做配置文件时，再换成读取 TOML。
-
-【4.2】lyrics_path
-
-  签名：def lyrics_path(uri: str) -> Path:
-
-  实现：return LRC_DIR / Path(uri).with_suffix(".lrc")
-
-  说明：
-    - uri 是 MPD 给的相对路径；
-    - with_suffix 只替换最后一段后缀，.flac / .m4a 同样适用；
-    - uri 里如果有子目录，会自动带入（镜像结构）。
-
-【4.3】load_lyrics
-
-  签名：def load_lyrics(uri: str) -> list[LyricLine] | None:
-
-  参数：uri，MPD 的相对路径
-  返回：
-    解析成功 -> list[LyricLine]
-    文件不存在 -> None
-
-  注意：不再需要 music_dir 参数，LRC_DIR 从 config 读。
+  参数：音乐根目录（传 MUSIC_DIR）
+  返回：按名字排序的 Playlist 列表；没有歌单时返回 []
 
   步骤：
-    1. lrc = lyrics_path(uri)
-    2. if not lrc.exists(): return None
-    3. 依次尝试读取：
-         text = lrc.read_text(encoding="utf-8")
-       失败（UnicodeDecodeError）再试 gbk；
-       再失败用 encoding="utf-8", errors="replace"
-    4. return parse_lrc(text)
+    1. if not music_dir.is_dir(): return []
+    2. 用 music_dir.iterdir() 拿到所有直接子项；
+       捕获 OSError（权限问题等），出错返回 []
+    3. 逐个过滤：
+         - 不是目录（p.is_dir() 为 False）-> 跳过
+         - p.name 在 IGNORED_PLAYLIST_NAMES 里 -> 跳过
+         - p.name 以 "." 开头 -> 跳过（隐藏目录）
+         - 其余生成 Playlist(p.name, p)
+    4. 按 p.name 排序
+    5. return
 
-【4.4】可用的内置函数 / 方法
+  可用函数 / 方法：
+    Path.is_dir()
+    Path.iterdir()
+    Path.name
+    sorted(..., key=lambda p: p.name)
+    list.append()
 
-  Path / 运算符                    路径拼接
-  Path.with_suffix(".lrc")        换后缀
-  Path.exists()                   是否存在
-  Path.read_text(encoding=...)    一次读完
-  except UnicodeDecodeError:      换编码
-  except OSError:                 读不了时返回 None
+【1.4】边界
 
-【4.5】边界
+  - MUSIC_DIR 不存在：返回 []；
+  - 没有子目录：返回 []；
+  - 目录没有读权限：捕获 OSError，返回 []（不要让它崩 App）；
+  - 只有 lrc/：返回 []；
+  - 子目录里没有音频：仍然返回（是否过滤是以后的事）；
+  - 只看顶层，不递归（歌单里的子目录由 MPD 的 add 递归处理）。
 
-  - 文件存在但为空：parse_lrc 返回 []，界面显示"暂无歌词"；
-  - uri 含中文/空格：Path 正常处理，不用手动转义；
-  - 不要把所有异常都吞成 None，编码问题和文件问题分开处理，
-    方便排查。
+【1.5】单测（和代码一起写）
+
+  新建 scripts/test_playlists.py：
+    from music_tui.core.playlists import Playlist, scan_playlists
+
+  测试点：
+    1) tmp_path 下建 中文/、日语/、lrc/、.hidden/、一个普通文件；
+       断言只返回 中文、日语，且顺序正确；
+    2) 空目录 -> []；
+    3) 不存在的目录 -> []；
+    4) 返回的 Playlist.name 和 .path 对得上。
+
+  运行：
+    .venv/bin/pytest scripts/test_playlists.py -v
 
 
-八、卡 5：单测（不启动界面）
+五、卡 2：MPD 载入文件夹 services/mpd.py
 ----------------------------------------------------------------
-【5.1】为什么先写单测
+【2.1】MpdService 新方法
 
-  解析器是纯函数：不依赖终端、MPD、Textual。
-  在这里把"时间算错、顺序错、编码错"全部消灭掉，
-  后面调界面时就不会把"解析错了"误判成"界面坏了"。
+  签名：
+    def load_folder(self, folder: str) -> None:
 
-  这一步不需要打开 TUI，也不需要放歌。
-
-【5.2】文件位置与运行方式
-
-  文件：scripts/test_lyrics.py
+  职责：把"载入一个歌单"这件事丢给命令线程。
+  实现只需要：
+    self.send("__folder__", folder)
 
   说明：
-    scripts/ 不是包，不需要 __init__.py；
-    在项目根目录执行 pytest，直接指定文件路径即可；
-    项目是 editable 安装，music_tui 能正常 import。
-
-  常用命令：
-
-    全部跑：
-      .venv/bin/pytest scripts/test_lyrics.py -v
-
-    只跑名字里带 offset 的：
-      .venv/bin/pytest scripts/test_lyrics.py -k offset -v
-
-    只跑某一个：
-      .venv/bin/pytest scripts/test_lyrics.py::test_parse_multi_stamp -v
-
-    第一次失败就停：
-      .venv/bin/pytest scripts/test_lyrics.py -x -v
-
-  跑之前确认环境：
-    .venv/bin/python -c "import music_tui; print('ok')"
-
-【5.3】文件头
-
-  from __future__ import annotations
-
-  from pathlib import Path
-
-  from music_tui.config import LRC_DIR
-  from music_tui.core.lyrics import (
-      LyricLine,
-      index_at,
-      load_lyrics,
-      lyrics_path,
-      parse_lrc,
-  )
-
-  说明：
-    - 纯 assert 不需要 import pytest；
-    - 用到 pytest.raises 时再加 import pytest；
-    - monkeypatch / tmp_path 是 pytest 自动注入的参数，不用 import。
-
-【5.4】测试清单（17 个，分五组）
-
-  A. parse_lrc 基础（11 个）
-    1. 单行单时间戳
-    2. 一行多时间戳
-    3. 元数据行被忽略
-    4. 空行/空白行被忽略
-    5. 毫秒补齐：.5 / .50 / .500 / 完全没有毫秒
-    6. 跨分钟：01:05.25 -> 65250
-    7. 乱序输入 -> 输出按时间有序
-    8. 空文本 -> []
-    9. 坏行不崩（"随便一行"、"[00:xx]坏行"）
-   10. offset 正数：时间减小
-   11. offset 负数：时间增大
-
-  B. index_at 边界（1 个）
-   12. 空列表、负数、第一句之前、正好第一句、中间、正好最后、超过最后
-
-  C. lyrics_path（2 个）
-   13. 平铺：a.mp3 -> LRC_DIR/a.lrc
-   14. 子目录：专辑A/01.flac -> LRC_DIR/专辑A/01.lrc
-
-  D. load_lyrics（3 个）
-   15. 文件存在：能读出内容
-   16. 文件不存在：返回 None
-   17. GBK 编码：能自动回退
-
-【5.5】完整测试模板（可以直接抄）
-
-  注意：下面代码在文档里整体缩进 2 格用于排版。
-  复制到编辑器后，全选并按 Shift+Tab（或删掉每行开头 2 个空格），
-  让第一行 from __future__ 顶格，否则会报 IndentationError。
-
-  from __future__ import annotations
-
-  from pathlib import Path
-
-  from music_tui.config import LRC_DIR
-  from music_tui.core.lyrics import (
-      LyricLine,
-      index_at,
-      load_lyrics,
-      lyrics_path,
-      parse_lrc,
-  )
-
-
-  # ---------- parse_lrc ----------
-
-  def test_parse_single_line() -> None:
-      lines = parse_lrc("[00:01.00]hello")
-      assert len(lines) == 1
-      assert lines[0].time_ms == 1000
-      assert lines[0].text == "hello"
-
-
-  def test_parse_multi_stamp() -> None:
-      lines = parse_lrc("[00:01.00][00:05.00]副歌")
-      assert [(l.time_ms, l.text) for l in lines] == [
-          (1000, "副歌"),
-          (5000, "副歌"),
-      ]
-
-
-  def test_parse_ignores_metadata() -> None:
-      text = "[ti:歌名]\n[ar:歌手]\n[al:专辑]\n[00:02.00]正文"
-      assert len(parse_lrc(text)) == 1
-
-
-  def test_parse_ignores_blank_lines() -> None:
-      text = "\n\n[00:01.00]a\n   \n[00:02.00]b\n"
-      assert [l.text for l in parse_lrc(text)] == ["a", "b"]
-
-
-  def test_parse_ms_padding() -> None:
-      text = "[00:01.5]a\n[00:02.50]b\n[00:03.500]c\n[00:04]d"
-      assert [l.time_ms for l in parse_lrc(text)] == [1500, 2500, 3500, 4000]
-
-
-  def test_parse_cross_minute() -> None:
-      assert parse_lrc("[01:05.25]x")[0].time_ms == 65250
-
-
-  def test_parse_sorts_output() -> None:
-      text = "[00:05.00]b\n[00:01.00]a"
-      assert [l.time_ms for l in parse_lrc(text)] == [1000, 5000]
-
-
-  def test_parse_empty_text() -> None:
-      assert parse_lrc("") == []
-
-
-  def test_parse_skips_bad_lines() -> None:
-      text = "随便一行\n[00:xx]坏行\n[00:01.00]好行"
-      lines = parse_lrc(text)
-      assert len(lines) == 1
-      assert lines[0].text == "好行"
-
-
-  def test_parse_offset_positive() -> None:
-      assert parse_lrc("[offset:+500]\n[00:10.00]x")[0].time_ms == 9500
-
-
-  def test_parse_offset_negative() -> None:
-      assert parse_lrc("[offset:-500]\n[00:10.00]x")[0].time_ms == 10500
-
-
-  # ---------- index_at ----------
-
-  def test_index_at_boundaries() -> None:
-      lines = [
-          LyricLine(1000, "a"),
-          LyricLine(3000, "b"),
-          LyricLine(5000, "c"),
-      ]
-      assert index_at([], 1000) == -1
-      assert index_at(lines, -1) == -1
-      assert index_at(lines, 500) == -1
-      assert index_at(lines, 1000) == 0
-      assert index_at(lines, 2999) == 0
-      assert index_at(lines, 3000) == 1
-      assert index_at(lines, 9999) == 2
-
-
-  # ---------- lyrics_path ----------
-
-  def test_lyrics_path_flat() -> None:
-      assert lyrics_path("a.mp3") == LRC_DIR / "a.lrc"
-
-
-  def test_lyrics_path_subdir() -> None:
-      assert lyrics_path("专辑A/01.flac") == LRC_DIR / "专辑A" / "01.lrc"
-
-
-  # ---------- load_lyrics ----------
-
-  def test_load_lyrics_existing(tmp_path: Path, monkeypatch) -> None:
-      lrc = tmp_path / "a.lrc"
-      lrc.write_text("[00:01.00]你好\n", encoding="utf-8")
-      monkeypatch.setattr("music_tui.core.lyrics.LRC_DIR", tmp_path)
-
-      lines = load_lyrics("a.mp3")
-
-      assert lines is not None
-      assert lines[0].time_ms == 1000
-      assert lines[0].text == "你好"
-
-
-  def test_load_lyrics_missing(tmp_path: Path, monkeypatch) -> None:
-      monkeypatch.setattr("music_tui.core.lyrics.LRC_DIR", tmp_path)
-      assert load_lyrics("nope.mp3") is None
-
-
-  def test_load_lyrics_gbk(tmp_path: Path, monkeypatch) -> None:
-      lrc = tmp_path / "b.lrc"
-      lrc.write_bytes("[00:01.00]你好\n".encode("gbk"))
-      monkeypatch.setattr("music_tui.core.lyrics.LRC_DIR", tmp_path)
-
-      lines = load_lyrics("b.mp3")
-
-      assert lines is not None
-      assert lines[0].text == "你好"
-
-【5.6】关于 monkeypatch 的两点说明
-
-  1. 为什么用 monkeypatch，不直接改配置：
-     改全局会让后面的测试也受影响；monkeypatch 会在每个测试结束后
-     自动还原。
-
-  2. 为什么 setattr 的字符串是 "music_tui.core.lyrics.LRC_DIR"：
-     lyrics.py 里是 from music_tui.config import LRC_DIR，
-     名字被复制进了 lyrics 模块；要改的是"lyrics 模块里那个名字"，
-     不是 config 里的。如果改成 "music_tui.config.LRC_DIR"，不生效。
-
-【5.7】预期输出
-
-  scripts/test_lyrics.py::test_parse_single_line PASSED
-  scripts/test_lyrics.py::test_parse_multi_stamp PASSED
-  ...
-  scripts/test_lyrics.py::test_load_lyrics_gbk PASSED
-
-  ============================== 17 passed in 0.08s ==============================
-
-  出现 failed 时，先看断言那一行：
-    - 期望 1000 实际 1500：毫秒补齐算法错了；
-    - 期望 2 条实际 1 条：没有遍历 stamps；
-    - 期望 [1000, 5000] 实际 [5000, 1000]：没有 sort；
-    - 期望 -1 实际 0：index_at 没有处理"第一句之前"。
-
-【5.8】常见问题
-
-  现象                         原因                          处理
-  ModuleNotFoundError         在错误目录运行 / 未安装      在项目根目录跑；uv sync
-  monkeypatch 不生效          改错了模块路径                用 "music_tui.core.lyrics.LRC_DIR"
-  GBK 测试失败                读文件没有回退编码            先 utf-8，再 gbk
-  index_at 空列表报错         没有先判断空列表              if not lines: return -1
-  load_lyrics 返回 None       路径拼错 / 文件名不一致       打印 lyrics_path(uri) 对照
-
-【5.9】这一步不要做的事
-
-  - 不要在单测里读真实的 ~/Music：用 tmp_path。
-  - 不要在单测里启动 Textual App：那是卡 6 的事。
-  - 不要为了让测试通过而改断言：先判断是代码错还是期望值错。
-  - 不要一次写完 17 个再跑：写一个跑一个，失败范围最小。
-
-
-九、卡 6：LyricsPane 控件
+    - folder 是相对路径，例如 "中文"、"日语"；
+    - 不要在这里拼 MUSIC_DIR，MPD 的 add 用的是相对 music_directory 的路径。
+
+【2.2】_execute 里加分支
+
+  在 __cover__ 分支后面加一个：
+    elif command == "__folder__":
+        folder = args[0]
+        client.clear()
+        client.add(folder)
+        尝试 client.play(0)，捕获 CommandError
+
+  为什么用一条特殊命令：
+    - clear() 会停播并清空队列；
+    - add(folder) 会递归加入该目录下所有歌曲；
+    - play(0) 播放第一首；
+    - 三件事在同一个命令线程里一次完成，不会被别的命令插队。
+
+  为什么 play(0) 要 try/except：
+    空文件夹 add 之后队列仍是空的，play(0) 会抛 CommandError。
+    这不是错误，UI 继续显示"队列为空"即可。
+
+【2.3】验证（先不用 UI）
+
+  手动确认 MPD 能识别这些文件夹：
+    mpc ls
+    mpc clear
+    mpc add 中文
+    mpc playlist | head
+    mpc play 0
+
+  如果 mpc add 中文 没有反应：
+    - 确认 MPD 的 music_directory 是 /home/lwq/Music；
+    - 跑一次 mpc update；
+    - 看 mpc ls 里有没有 "中文"。
+
+【2.4】边界
+
+  - 文件夹名带空格/中文：直接传字符串，MPD 支持 UTF-8；
+  - 文件夹里有子目录：add 会递归加入，不需要逐个 add；
+  - MPD 没连上：命令线程会重连，UI 先切到主界面，
+    等连上后队列再填充；
+  - 空文件夹：队列为空，不崩。
+
+
+六、卡 3：歌单控件 widgets/playlists.py
 ----------------------------------------------------------------
-【6.1】目标
+【3.1】结构
 
-  做一个只负责显示的控件：给它歌词和当前时间，它负责
-  "高亮哪一行"和"滚到哪里"，不碰文件、不碰 MPD、不碰 App 状态。
+  PlaylistPane(Pane)
+    ├── Static("选择歌单", id="playlist-title")
+    └── VerticalScroll#playlist-scroll
+          └── Static(id="playlist-body")
 
-  结构（控件树，不是代码）：
+  Pane 已经有 can_focus，焦点可以直接放在 PlaylistPane 上。
+  边框已经在 app 的 CSS 里去掉了，这里不用再管边框。
 
-    LyricsPane(Pane)
-      └── VerticalScroll#lyrics-scroll
-            ├── 第 1 行 Static（class="lyric"）
-            ├── 第 2 行 Static
-            └── ...
+【3.2】字段
 
-  为什么每行一个 Static：
-    长句会自动换行。用一个大 Static 装所有行时，
-    "歌词第 N 行"和"屏幕第 N 行"对不上，滚动会偏。
+  selected = reactive(0)          # 和 QueuePane 一样
+  self._names: list[str] = []     # 当前显示的文件夹名
 
-【6.2】你需要自己维护的三个状态
-
-  字段        类型                含义
-  _lines      list[LyricLine]     当前歌词数据
-  _rows       list[Static]        和 _lines 一一对应的控件
-  _current    int                 当前高亮行，-1 表示没有
-
-  规则：
-    - 三者必须同步；_rows 和 _lines 长度不一致，高亮就会指错行；
-    - 每次 set_lines 都要把 _current 重置为 -1。
-
-【6.3】要实现的方法（只给签名和职责）
+【3.3】要写的方法
 
   1) compose(self) -> ComposeResult
+     产出上面那三个控件。
+     注意：Pane 的默认 compose 是产出一个 body Static，
+     这里重写它，所以不要再调 super().compose()。
 
-     返回一个 VerticalScroll，id 固定为 lyrics-scroll。
-     不要在这里创建歌词行。
+  2) set_playlists(self, names: list[str]) -> None
+     - self._names = names
+     - self.selected = 0
+     - 调一次 _redraw()
 
-  2) set_lines(self, lines: list[LyricLine]) -> None
+  3) move(self, delta: int) -> None
+     - 没有歌单就直接 return
+     - selected = (selected + delta) % len(names)
+     - reactive 变化会自动触发 watch_selected -> _redraw
 
-     要做的事：
-       - 清空旧行；
-       - 按 lines 重新创建行控件；
-       - lines 为空时显示"暂无歌词"；
-       - 重置 _lines / _rows / _current。
+  4) current_name(self) -> str | None
+     - 空列表返回 None
+     - 否则返回 self._names[self.selected]
 
-  3) set_position(self, position_ms: int) -> None
+  5) watch_selected(self) -> None
+     - 调 _redraw()
 
-     要做的事：
-       - 用 index_at 算出当前行；
-       - 和 _current 相同就直接返回（避免每 100ms 重画）；
-       - 不同则：取消旧行高亮、设置新行高亮、滚动到新行；
-       - idx < 0（还没到第一句）时不点亮任何行。
+  6) _redraw(self) -> None
+     - query_one("#playlist-body", Static)
+     - 空列表：显示"没有找到歌单"
+     - 非空：逐行生成
+         选中：  [reverse]📁 名字[/]
+         非选中：  📁 名字
+     - 用 config 里的 PLAYLIST_ICON，不要写死
+     - 名字用 rich.markup.escape(name)，防止文件夹名里的
+       "[" 被当成 Rich 标记（之前歌词里踩过这个坑）
 
-  4) on_resize(self) -> None（可选）
+【3.4】可用 API
 
-     第一版可以不做。如果窗口尺寸变化后滚动位置不对，
-     再在这里重新滚动到当前行。
+  self.query_one("#playlist-body", Static)
+  body.update("\n".join(lines))
+  reactive / watch_selected
+  from rich.markup import escape
 
-【6.4】可用的 API
+  参考实现：widgets/queue.py 的 set_songs / move / _redraw，
+  把"歌曲"换成"文件夹名"，把图标换成 PLAYLIST_ICON。
 
-  self.query_one("#lyrics-scroll", VerticalScroll)
-  Container.mount(widget)
-  Container.mount_all(list_of_widgets)
-  Widget.remove_children()
-  Widget.set_class(True/False, "current")
-  ScrollView.scroll_to_widget(widget, animate=False, center=True)
+【3.5】边界
 
-  说明：
-    - mount / mount_all / remove_children 返回 awaitable，
-      但可以直接调用，不需要 await；
-    - scroll_to_widget 的 center=True 会把目标行放在中间。
+  - names 为空：显示占位，move 不动作，current_name 返回 None；
+  - 只有一个歌单：上下键原地不动；
+  - 名字里有 "["：escape；
+  - 文件夹很多：VerticalScroll 负责滚动，不额外处理；
+  - 📁 在终端里占 2 列：Textual 会按 wcwidth 处理，
+    如果某些字体显示成方块，把 PLAYLIST_ICON 换成 "▸"。
 
-【6.5】需要你自己想清楚的边界
+【3.6】可选：样式
 
-  - 第一次 set_position 时 _current 是 -1，没有旧行需要取消高亮；
-  - position 在第一句之前，index_at 返回 -1，不能去取 _rows[-1]；
-  - 同一行反复到达，必须直接返回，不能每次重画；
-  - 空歌词时 set_position 不能崩（_rows 为空）；
-  - 切换页面时控件可能暂时隐藏，set_lines 仍应正常工作；
-  - 长行换行后滚动定位是否还准？不准的话考虑截断或调整行高。
-
-【6.6】CSS（可以直接用）
-
-  #lyrics-scroll { height: 1fr; }
-  .lyric { color: $text-muted; }
-  .lyric.current { color: $text; text-style: bold; }
-  #song-page { width: 1fr; height: 1fr; }
-
-  说明：
-    #song-page 是 LyricsPane 在 ContentSwitcher 里的 id，
-    不撑满的话切页后高度可能是 0。
-
-【6.7】验收（先不接 MPD）
-
-  在测试 App 里用写死的 20 行歌词 + 一个定时器模拟位置：
-
-  [ ] 行控件数量等于歌词行数
-  [ ] 位置推进时，只有当前行有 current 类
-  [ ] 当前行会滚到可视区中间
-  [ ] 传空列表时显示"暂无歌词"，不崩
-  [ ] 位置倒退时也能正确回退高亮
-  [ ] 同一位置连续调用 10 次，界面不闪
-
-【6.8】自查问题（答不上来就回去看 6.2 / 6.3）
-
-  1. 为什么 _rows 和 _lines 必须一一对应？
-  2. 为什么 set_position 要先比较 idx == _current？
-  3. 为什么滚动传的是控件，而不是行号？
-  4. 空歌词时 set_position 会在哪一步出错？怎么避免？
+  #playlist-title { height: 1; padding: 1 2 0 2; color: $text-muted; }
+  #playlist-scroll { height: 1fr; }
+  #playlist-body { padding: 0 2; }
 
 
-十、卡 7：接线（app.py）
+七、卡 4：app.py 接线
 ----------------------------------------------------------------
-【7.1】__init__ 加字段
+【4.1】新字段
 
-  self._lyrics_uri: str | None = None
+  在 __init__ 里加：
+    self._mode: str = "playlist"        # "playlist" | "main"
+    self._playlists: list[Playlist] = []
 
-【7.2】新增 _maybe_load_lyrics
+  _playlists 保存扫描结果，后面"返回歌单 / 显示数量"会用。
 
-  签名：def _maybe_load_lyrics(self) -> None:
+【4.2】compose 重构
 
-  照抄 _maybe_load_cover 的结构：
-    1. if self.svc is None or self._last is None: return
-    2. uri = self.query_one(QueuePane).uri_at(self._last.song)
-    3. if uri is None:
-           if self._lyrics_uri is not None:
-               self._lyrics_uri = None
-               self.query_one(LyricsPane).set_lines([])
-           return
-    4. if uri == self._lyrics_uri: return
-    5. self._lyrics_uri = uri
-    6. lines = load_lyrics(uri)
-       self.query_one(LyricsPane).set_lines(lines or [])
+  现在的结构：
+    #tabs
+    #body
+    StatusBar
+
+  改成：
+    ContentSwitcher(initial="playlist-screen", id="root")
+      ├── PlaylistPane("playlists", id="playlist-screen")
+      └── Vertical(id="main-screen")
+            ├── #tabs
+            ├── #body
+            └── StatusBar
+
+  注意：
+    - 原来的 tabs/body/StatusBar 原样搬进 #main-screen，
+      里面的 query_one("#body")、query_one("#pages") 都不用改；
+    - #root 和 #main-screen 都要 height: 1fr；
+    - #playlist-screen 要 width/height: 1fr。
+
+  CSS 最少加：
+    #root { height: 1fr; }
+    #main-screen { width: 1fr; height: 1fr; }
+    #playlist-screen { width: 1fr; height: 1fr; }
+
+【4.3】on_mount 改三行
+
+  现在：
+    self.svc = MpdService(); self.svc.start()
+    self.set_focus(self.query_one("#queue"))
+    self.set_interval(0.1, self._pump)
+    self._update_tabs()
+
+  改成：
+    1. 还是先启动 svc
+    2. 调 self._load_playlists()
+    3. set_focus 改为 PlaylistPane
+    4. 保留 set_interval 和 _update_tabs
+
+  说明：
+    - MPD 服务照常启动，_pump 照常跑；
+    - 主界面虽然隐藏，控件已经挂载，不需要延迟创建。
+
+【4.4】_load_playlists
+
+  签名：
+    def _load_playlists(self) -> None:
+
+  步骤：
+    1. self._playlists = scan_playlists(MUSIC_DIR)
+    2. names = [p.name for p in self._playlists]
+    3. self.query_one(PlaylistPane).set_playlists(names)
 
   需要的 import：
-    from music_tui.core.lyrics import load_lyrics
-    from music_tui.widgets.lyrics import LyricsPane
+    from music_tui.config import MUSIC_DIR
+    from music_tui.core.playlists import Playlist, scan_playlists
+    from music_tui.widgets.playlists import PlaylistPane
 
-  注意：不再需要 import MUSIC_DIR，路径逻辑都在 load_lyrics 里。
+【4.5】_enter_playlist
 
-【7.3】在 _pump 里调用两次
+  签名：
+    def _enter_playlist(self) -> None:
 
-  StatusEvent 分支末尾：self._maybe_load_lyrics()
-  QueueEvent  分支末尾：self._maybe_load_lyrics()
+  步骤：
+    1. if self._mode != "playlist" or self.svc is None: return
+    2. name = self.query_one(PlaylistPane).current_name()
+    3. if name is None: return
+    4. self.svc.load_folder(name)
+    5. self._mode = "main"
+    6. root = self.query_one("#root", ContentSwitcher)
+       root.current = "main-screen"
+    7. self.set_focus(self.query_one("#queue"))
+    8. self._update_tabs()
 
-  原因：播放位置和队列是两个数据源，到达顺序不保证。
+  说明：
+    - 先切界面再等队列事件也行；队列事件到了 QueuePane 会自己刷新；
+    - 不要在这里阻塞等待 MPD，命令是异步的。
 
-【7.4】在 _pump 末尾刷新高亮
+【4.6】按键分流
 
-  现有代码：
-    pos = self._last.position()
-    self.query_one(ProgressBar).progress = pos
-    self.query_one("#elapsed", Static).update(fmt_time(pos))
+  现在四个 action 都直接操作队列，加上 _mode 判断：
 
-  后面加：
-    self.query_one(LyricsPane).set_position(int(pos * 1000))
+  action_row_down / action_row_up
+    _mode == "playlist" -> PlaylistPane.move(±1)
+    _mode == "main"     -> QueuePane.move(±1)
 
-  set_position 内部会判断"行没变就返回"，每 0.1 秒调用没问题。
+  action_play_selected
+    _mode == "playlist" -> self._enter_playlist()
+    _mode == "main"     -> 原来的 QueuePane 播放逻辑
 
-【7.5】替换占位
+  action_play_pause
+    _mode == "playlist" -> 直接 return
+    _mode == "main"     -> svc.toggle()
 
-  compose 里：
-    Static("[dim]song page[/]", id="song-page")
-  改成：
-    LyricsPane("lyrics", id="song-page")
+  action_page_prev / action_page_next
+    _mode == "playlist" -> 直接 return
+    _mode == "main"     -> 原来的 _switch_page
+
+  q 不用改，任何时候都能退出。
+
+【4.7】_pump 要不要改
+
+  可以完全不动。
+  歌单界面显示时，_pump 仍会更新隐藏的队列/歌词/封面，
+  不会报错，只是多做一点事。
+
+  如果想让歌单界面更省：
+    if self._mode == "main" and self._last is not None:
+        再做 progress / set_position
+
+  第一版建议不改，减少变量。
+
+【4.8】CSS 提醒
+
+  主界面原来没有边框，歌单页也不加边框。
+  歌单页只是"标题 + 列表"，保持和现在风格一致。
+
+  如果 #playlist-screen 的尺寸不对，优先检查：
+    - #root 有没有 height: 1fr；
+    - #main-screen / #playlist-screen 有没有 height: 1fr。
 
 
-十一、验收（按顺序打勾）
+八、卡 5：测试
 ----------------------------------------------------------------
-  [ ] ~/Music/lrc/ 已建好
-  [ ] lrc/ 下有一份与测试歌曲同名的 .lrc
-  [ ] pytest scripts/test_lyrics.py 全绿
-  [ ] song 页显示歌词，不再显示"song page"
-  [ ] 播放时当前行变亮、加粗
-  [ ] 当前行自动滚动到可视区中间
-  [ ] 切到 cover 页再切回来，歌词和高亮还在
-  [ ] 切到没有 .lrc 的歌，显示"暂无歌词"
-  [ ] 切到有 .lrc 的歌，歌词自动换
-  [ ] 队列 ↑/↓/回车/空格不受影响
-  [ ] ruff check src/ 全绿
-  [ ] mypy src/music_tui 无新增错误
+【5.1】扫描逻辑（必须）
 
-  验证"不需要扫描"的两条：
-  [ ] 新建一个 .lrc 后，切走再切回这首歌，能读到（不需要重启）
-  [ ] 删掉 .lrc 后，切走再切回，显示"暂无歌词"（不报错）
-      注意：同一首歌不会自动重读，靠 _lyrics_uri 变化触发；
-      切走再切回是最简单的强制重载方式。
+  新建 scripts/test_playlists.py，覆盖：
+    - 正常排序
+    - 排除 lrc
+    - 排除 . 开头的目录
+    - 普通文件不算歌单
+    - 空目录
+    - 不存在的目录
+
+  命令：
+    .venv/bin/pytest scripts/test_playlists.py -v
+
+【5.2】可选：歌单控件
+
+  用 run_test 挂一个只含 PlaylistPane 的小 App：
+    - set_playlists(["中文","日语","其他"])
+    - move(1) 后 current_name == "日语"
+    - move(-1) 回到 "中文"
+    - move(1) 从最后绕回第一个
+    - 空列表 current_name is None
+  这个测试不需要 MPD。
+
+【5.3】可选：整机 smoke
+
+  用 fake svc 启动 MusicTui，断言：
+    - 启动时 #root.current == "playlist-screen"
+    - PlaylistPane 里有名字
+    - 调用 _enter_playlist 后 #root.current == "main-screen"
+    - 不需要真的连 MPD
 
 
-十二、卡住时怎么排查
+九、重要：迁移现有歌词目录
 ----------------------------------------------------------------
-  1. 歌词不显示：
-     a. 打印 lyrics_path(uri) 的结果，路径对不对；
-     b. 确认文件真的存在（ls 一下）；
-     c. 打印 load_lyrics 的返回值，是 None 还是 []；
-     d. 打印 _lyrics_uri，有没有被赋值。
-  2. 显示了但不高亮：
-     a. 打印 index_at 的返回值；
-     b. 检查 _rows 长度和 idx 是否越界；
-     c. 检查 CSS 类名是不是 "current"。
-  3. 高亮但没滚动：
-     a. 确认 query_one("#lyrics-scroll") 没抛异常；
-     b. 确认传进 scroll_to_widget 的 row 是 _rows 里的同一个对象。
-  4. 切页后歌词消失：
-     a. 检查 #song-page 是否有 height: 1fr；
-     b. 检查是否在切页时误调了 set_lines([])。
-  5. 路径不对：
-     a. uri 里有没有子目录；
-     b. 文件名里的空格/中文是否和音频完全一致（包括全角符号）。
+现在歌词是平铺的：
+  ~/Music/lrc/Michita - Cry For Me (feat. Ami).lrc
+  ~/Music/lrc/王忻辰&苏星婕-去年花开.lrc
+  ~/Music/lrc/Ba+-+Duvet.lrc
+  ~/Music/lrc/松下優也 - Mr.“Broken Heart” (Instrumental).lrc
+
+歌曲现在在子目录里，lyrics_path(uri) 会把歌单名算进去，
+所以歌词也要跟着进子目录：
+
+  ~/Music/lrc/日语/Michita - Cry For Me (feat. Ami).lrc
+  ~/Music/lrc/中文/王忻辰&苏星婕-去年花开.lrc
+  ~/Music/lrc/其他/Ba+-+Duvet.lrc
+  ~/Music/lrc/纯音乐/松下優也 - Mr.“Broken Heart” (Instrumental).lrc
+
+迁移命令（先确认目标目录不存在同名文件）：
+
+  mkdir -p ~/Music/lrc/中文 ~/Music/lrc/日语 ~/Music/lrc/纯音乐 ~/Music/lrc/其他
+  mv ~/Music/lrc/Michita*.lrc   ~/Music/lrc/日语/
+  mv ~/Music/lrc/王忻辰*.lrc    ~/Music/lrc/中文/
+  mv ~/Music/lrc/Ba+-+Duvet.lrc ~/Music/lrc/其他/
+  mv ~/Music/lrc/松下*.lrc      ~/Music/lrc/纯音乐/
+
+验证：
+
+  .venv/bin/python -c "
+  from music_tui.core.lyrics import lyrics_path
+  print(lyrics_path('日语/Michita - Cry For Me (feat. Ami).mp3'))
+  "
+
+  输出应该是 ~/Music/lrc/日语/...lrc。
+
+注意：
+  - lrc/ 本身必须被 scan_playlists 排除，否则它会变成一个歌单；
+  - 日语/松下優也 - Mr. Broken Heart.mp3 和
+    纯音乐/松下優也 - Mr.“Broken Heart” (Instrumental).mp3
+    是两个文件，占位歌词只对应纯音乐那个，不要放错；
+  - 其他/ 里同时有 Ba+-+Duvet.flac 和 Bôa - Duvet.mp3，
+    现有 LRC 只对应 Ba+-+Duvet.flac。
 
 
-十三、以后再做：孤儿清理
+十、验收清单
 ----------------------------------------------------------------
-  这是唯一需要扫描 lrc/ 的场景，和播放路径无关。
+  [ ] 启动显示歌单列表，不是直接进主界面
+  [ ] 列表里有 📁 图标，顺序稳定
+  [ ] lrc 不出现在歌单里
+  [ ] 上下键循环选择，选中行反色
+  [ ] Enter 后进入主界面
+  [ ] 队列里只有该文件夹的歌曲
+  [ ] 第一首开始播放（或队列已载入，取决于 play(0)）
+  [ ] 歌词能显示（迁移后的那几首）
+  [ ] 封面、左右切页正常
+  [ ] 空格暂停、上下选歌、Enter 播放正常
+  [ ] 空文件夹进入后不崩，显示"队列为空"
+  [ ] q 能退出
+  [ ] pytest 全绿
+  [ ] ruff check src/ scripts/ 无新增错误
 
-  思路：
-    1. 遍历 LRC_DIR 下所有 *.lrc（Path.rglob）；
-    2. 用相对路径反推音频路径：MUSIC_DIR / relative.with_suffix(".mp3")；
-       但后缀未知，可以只比较"去掉后缀的相对路径"是否存在于音频集合中；
-    3. 用一个集合装 MUSIC_DIR 下所有音频的相对路径（去后缀）；
-    4. lrc 的相对路径（去后缀）不在集合里 -> 孤儿；
-    5. 默认只打印，不删除；加 --delete 才删。
 
-  可选的另一个方向：
-    找出"有音频但没有 lrc"的歌，作为待补歌词列表。
-
-
-十四、GitHub 搜索词
+十一、卡住时怎么排查
 ----------------------------------------------------------------
-直接搜仓库：
-  https://github.com/search?q=textual+lyrics&type=repositories
-  https://github.com/search?q=lrc+parser+language%3APython&type=repositories
-  https://github.com/search?q=mpd+lyrics&type=repositories
-  https://github.com/search?q=terminal+synced+lyrics&type=repositories
+1. 歌单列表是空的
+   - 打印 MUSIC_DIR，确认路径；
+   - 打印 scan_playlists(MUSIC_DIR) 的返回值；
+   - 确认目录有读权限；
+   - 确认不是全被 IGNORED_PLAYLIST_NAMES 排除了。
 
-代码搜索（需要登录）：
-  "scroll_to_widget" lyrics
-  "parse_lrc" python
-  textual scroll_to_widget center
+2. lrc 出现在歌单里
+   - IGNORED_PLAYLIST_NAMES 里有没有 "lrc"；
+   - scan_playlists 的过滤步骤有没有漏。
 
-可参考项目：
-  https://github.com/doakey3/pylrc                  Python LRC 解析库
-  https://github.com/moehmeni/syncedlyrics          Python 歌词获取（含 LRC）
-  https://github.com/gaher1096/sound-lyrics         终端卡拉 OK 歌词
-  https://github.com/ningmenglemon/lemony-lrc-parser  LRC 解析（中文项目）
-  https://github.com/env25/mpdlrc                  Go 的 MPD 歌词客户端
-  https://github.com/raitonoberu/sptlrx            终端同步歌词（Go）
+3. 按 Enter 没反应
+   - _mode 是不是 "playlist"；
+   - PlaylistPane.current_name() 是不是 None；
+   - self.svc 是不是 None；
+   - #root 的 id / current 写对没有。
 
-关键词：
-  LRC parser、synced lyrics、synchronized lyrics、lyrics TUI、
-  textual lyrics、mpd lyrics、scroll_to_widget、karaoke terminal
+4. 进入后队列是空的
+   - mpc ls 里有没有这个文件夹；
+   - mpc add 中文 能不能加歌；
+   - 文件夹里有没有音频；
+   - MPD 有没有 update。
+
+5. 中文文件夹 add 不进去
+   - 确认 MPD 的 music_directory 和 UTF-8；
+   - 用 mpc add "中文" 手动试。
+
+6. 歌词全是"暂无歌词"
+   - 歌词有没有迁移到 lrc/<歌单名>/；
+   - 打印 lyrics_path(uri) 看实际路径；
+   - 文件名和音频是否完全一致。
+
+7. 📁 显示成方块
+   - 换 PLAYLIST_ICON = "▸" 或 "🗀"；
+   - 或者用 "[b]▸[/]" 之类的纯文本。
+
+8. 排序不是想要的
+   - 现在是 Unicode 排序：中文、其他、日语、纯音乐；
+   - 要固定顺序，加 PLAYLIST_ORDER 列表，按列表下标排。
 
 
-十五、如果还是觉得大，可以再砍
+十二、可选扩展（以后再做）
 ----------------------------------------------------------------
-最小中的最小（一小时出效果）：
-  - 不做 load_lyrics，直接把一段写死的歌词放进 set_lines；
-  - 用 set_interval 模拟位置，只验证"高亮 + 滚动"；
-  - 文件读取和 app 接线放到下一步。
+  - Esc 从主界面回歌单：_mode 改回 "playlist"，
+    #root.current 改回 "playlist-screen"，焦点放回 PlaylistPane。
+  - 每个歌单显示歌曲数：scan 时统计音频后缀数量。
+  - 自定义顺序：config 里 PLAYLIST_ORDER。
+  - 记住上次歌单：用 platformdirs 存一个配置文件。
+  - 歌单内搜索 / 过滤。
+  - 从 MPD lsinfo 读歌单（如果想和 MPD 库完全一致）。
 
-每次只解决一个问题：先界面，再数据，最后接线。
 
+十三、节奏建议
+----------------------------------------------------------------
+第 1 次：卡 1（core/playlists.py）+ 单测，先把扫描跑通。
+第 2 次：卡 2（MpdService.load_folder）+ 用 mpc 手动验证。
+第 3 次：卡 3（PlaylistPane），先用假数据把列表和选择跑通。
+第 4 次：卡 4（app 接线）+ 第九节歌词迁移 + 验收。
 
-================================================================
-节奏建议：
-  第 1 次：卡 0（建 lrc 目录 + 测试歌词）+ 卡 1~5（数据层 + 单测）。
-  第 2 次：卡 6（LyricsPane 用假数据跑通）。
-  第 3 次：卡 7（接线）+ 验收。
-================================================================
+每次只做一张卡，跑一次 ruff / pytest，再往下。
